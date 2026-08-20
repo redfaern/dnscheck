@@ -214,6 +214,7 @@ check_ns() {
     local zone=$1 name=$2 ip=$3 signed=$4 out status flags soa_days
     NS_SERIAL=''
     NS_RRSIG_DAYS=''
+    NS_UNSIGNED=0
 
     out=$(auth_query "$zone" "$ip" SOA)
     if [[ -z $out ]]; then
@@ -247,6 +248,18 @@ check_ns() {
     # silently reclassified as fine — the precise failure this exists to catch.
     # Which zones are signed is a fact about your intent, so you state it.
     ((signed)) || return 0
+
+    # No signatures AT ALL from this server. Do not diagnose it here: one
+    # nameserver cannot tell "signing broke on this box" from "this zone was
+    # never signed and is in the wrong list", and those want opposite actions.
+    # Record it and let the zone loop decide, once every nameserver and both
+    # validators have been heard from. Six identical lines that each guess
+    # wrong are worse than one line that knows.
+    NS_UNSIGNED=0
+    if ! awk '$4=="RRSIG" && $5=="SOA"{f=1} END{exit !f}' <<<"$out"; then
+        NS_UNSIGNED=1
+        return 0
+    fi
 
     RRSIG_DAYS=''
     check_rrsig "$out" "$zone" "$name" SOA
@@ -285,13 +298,14 @@ unset _z
 for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     signed=${_entry%% *}
     zone=${_entry#* }
-    answered=0 serials='' min_days=''
+    answered=0 serials='' min_days='' unsigned_ns=''
 
     for pair in $NS; do
         name=${pair%%=*}; ip=${pair#*=}
         if check_ns "$zone" "$name" "$ip" "$signed"; then
             ((answered++))
             [[ -n $NS_SERIAL ]] && serials+="$name:$NS_SERIAL "
+            ((NS_UNSIGNED)) && unsigned_ns+="$name "
             if [[ -n $NS_RRSIG_DAYS ]]; then
                 [[ -z $min_days ]] && min_days=$NS_RRSIG_DAYS
                 (( NS_RRSIG_DAYS < min_days )) && min_days=$NS_RRSIG_DAYS
@@ -329,7 +343,7 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # been queried forces a full resolution now, and exercises the NSEC/NSEC3
     # denial-of-existence proof — the half of DNSSEC that breaks quietly.
     # The rcode does not matter here; the AD flag does.
-    v_answered=0
+    v_answered=0 v_ad=0 no_ad=''
     for v in $VALIDATORS; do
         label="dnscheck-$RANDOM$RANDOM.$zone"
         vout=$(dig +dnssec +time=5 +tries=2 @"$v" "$label" A 2>/dev/null)
@@ -337,8 +351,14 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
         [[ -z $vout || $vflags == '  ' ]] && continue
         ((v_answered++))
         if ((signed)); then
-            [[ $vflags == *" ad "* ]] \
-                || note "$zone: no AD flag from $v — the DNSSEC chain is not validating"
+            # Collected, not reported yet — for the same reason as the
+            # missing signatures above. "No AD" on a zone that was never
+            # signed is not a broken chain of trust, it is the absence of one.
+            if [[ $vflags == *" ad "* ]]; then
+                ((v_ad++))
+            else
+                no_ad+="$v "
+            fi
         elif [[ $(hdr_status "$vout") == SERVFAIL ]]; then
             # The failure mode unique to an unsigned zone. AD is absent by
             # definition here, so its absence proves nothing — but SERVFAIL
@@ -356,6 +376,30 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     done
     (( v_answered == 0 )) \
         && note "$zone: no validator reachable ($VALIDATORS) — chain of trust unconfirmed"
+
+    # Now enough is known to say which of the two very different things an
+    # absence of signatures means.
+    if ((signed)); then
+        u_count=0
+        [[ -n $unsigned_ns ]] && u_count=$(wc -w <<<"$unsigned_ns")
+
+        if (( u_count > 0 && u_count == answered && v_ad == 0 )); then
+            # Unanimous: no nameserver serves signatures and no validator sees
+            # a chain. This is not a zone whose signing broke, it is a zone
+            # that was never signed, sitting in the wrong list. ONE line that
+            # names the cause, rather than eight that each report a symptom.
+            # The missing AD is the same fact restated, so it is not repeated.
+            note "$zone: listed as signed, but NO nameserver serves signatures and no validator sees AD — this is an unsigned zone; move it to UNSIGNED_ZONES"
+        else
+            # Partial, and therefore real. A zone that is signed, with one
+            # server no longer serving the signatures, is exactly the fault a
+            # per-zone summary would have hidden — so name the server.
+            (( u_count > 0 ))                 && note "$zone: no RRSIG from ${unsigned_ns% } while other nameservers serve them — signing has stopped on that server"
+            for v in $no_ad; do
+                note "$zone: no AD flag from $v — the DNSSEC chain is not validating"
+            done
+        fi
+    fi
 
     # Trimmed: serials accumulates a trailing space, which showed up in every
     # summary line as "ns3:2026080414 ,".

@@ -102,6 +102,24 @@ immediately. A signed zone in `UNSIGNED_ZONES` is reported the first time a
 validator returns AD for it — that direction is the expensive one, because the
 zone works fine while its signature expiry goes unwatched.
 
+**A missing signature is diagnosed once, by the zone, not six times by the
+nameservers.** One nameserver cannot tell "signing broke on this box" from
+"this zone was never signed and is in the wrong list", and those two want
+opposite actions. So the per-server findings are collected and the judgement is
+made after every nameserver and both validators have been heard from:
+
+- **Unanimous** — no nameserver serves signatures, no validator sees AD. That
+  is not a zone whose signing broke; it is an unsigned zone in the wrong list,
+  and it says so in one line. The absent AD is the same fact restated, so it is
+  not reported again.
+- **Partial** — some servers serve signatures and others do not. That one IS a
+  fault, and a serious one, so the offending server is named.
+
+The first version reported eight problems for an unsigned zone added to
+`SIGNED_ZONES`, none of which named the cause. Eight accurate symptoms that
+leave you to work out the diagnosis are worse than one line that has already
+done it — an alert is only worth sending if it tells you what to do.
+
 **For unsigned zones the validator probe asks a different question.** AD is
 absent by definition, so its absence proves nothing. What is worth knowing is
 whether the zone RESOLVES: a SERVFAIL from a validating resolver usually means a
