@@ -1,0 +1,65 @@
+[Unit]
+Description=Authoritative DNS + DNSSEC health check
+Documentation=file:/usr/local/lib/dnscheck/NOTES.md
+# The check is worthless before the network is up, and a failure at boot would
+# be a false alarm rather than a finding.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# DynamicUser is the dedicated unprivileged account, without an account to
+# create, remember, or forget to lock. systemd allocates a transient UID for
+# the run and releases it afterwards: no shell, no home, no password, nothing
+# to log in as, and nothing left behind if this unit is ever removed.
+DynamicUser=yes
+
+# Read by PID 1 as root BEFORE dropping privileges, so this file can be
+# 0600 root:root — the service user never needs read access to the credential.
+EnvironmentFile=/etc/dnscheck/dnscheck.env
+
+ExecStart=/usr/local/lib/dnscheck/check-dns.sh
+
+# A hung dig must not leave a run wedged until the next one collides with it.
+#
+# Sized for the WORST case, which is a total outage: every one of the 18
+# authoritative queries burning its full +time=3 +tries=2 (108s), both
+# validators timing out on all three zones (60s), the mismatch re-check, and a
+# retrying curl. That is the run that most needs to finish, because it is the
+# one carrying the /fail ping. A 180s cap would SIGKILL it mid-report and turn
+# "DNS is down" into "the check went silent" — the same alert, a grace period
+# later, with none of the detail.
+RuntimeMaxSec=300
+
+# Nothing here writes a file, opens a socket that listens, or needs a
+# capability. Say so, so a compromised dig or curl has nowhere to go.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# AF_UNIX stays: curl resolves hc-ping.com through glibc, and on a
+# systemd-resolved host that goes over a unix socket. Dropping it turns the
+# ping into a name-resolution failure that looks like a network outage.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# No [Install] section, deliberately: the TIMER is what gets enabled. A
+# WantedBy here would also run the check once at every boot.

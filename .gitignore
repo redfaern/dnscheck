@@ -1,0 +1,15 @@
+# Real config — only the .example file is ever committed.
+# dnscheck.env holds HC_URL, which is a credential: anyone with it can forge a
+# check-in and keep the dead-man switch quiet while DNS is down.
+dnscheck.env
+*.local
+secrets/
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

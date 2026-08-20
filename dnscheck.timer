@@ -1,0 +1,29 @@
+[Unit]
+Description=Hourly DNS + DNSSEC health check
+Documentation=file:/usr/local/lib/dnscheck/NOTES.md
+
+[Timer]
+OnCalendar=hourly
+
+# Never on the hour. Every naive cron job on the Internet fires at :00, and the
+# resolvers and healthchecks.io both see that spike. Also stops this colliding
+# with mcsuper's hourly timers on the same box.
+RandomizedDelaySec=300
+
+# ...but the SAME offset every time. By default systemd re-rolls the delay
+# before each iteration, so two consecutive runs can be 60 min apart or 65,
+# and healthchecks.io has to absorb that 5-minute swing in its grace period.
+# FixedRandomDelay derives the offset from the machine ID and unit name
+# instead: still off the hour, still not colliding with anything else, but
+# stable — so the interval between pings is a flat 60 minutes and the grace
+# period only has to cover how long a run takes.
+FixedRandomDelay=yes
+
+# Catch up a run missed while the Pi was off. Cheap here, and it re-arms the
+# dead-man switch as soon as the box is back rather than at the next hour.
+Persistent=true
+
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
