@@ -167,13 +167,15 @@ if [[ -f $CONF_FILE ]]; then
         && note "$CONF_FILE still has the placeholder HC_URL — paste the real ping URL"
     grep -qE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.' "$CONF_FILE" 2>/dev/null \
         && note "$CONF_FILE still lists RFC 5737 documentation addresses in NS — put your real nameservers in"
-    grep -qE '^[[:space:]]*ZONES=.*example\.(com|net|org)' "$CONF_FILE" 2>/dev/null \
-        && note "$CONF_FILE still lists example.com/.net in ZONES — put your real zones in"
+    grep -qE '^[[:space:]]*(UN)?SIGNED_ZONES=.*example\.(com|net|org)' "$CONF_FILE" 2>/dev/null \
+        && note "$CONF_FILE still lists example.com/.net/.org as a zone — put your real zones in"
+    grep -qE '^[[:space:]]*ZONES[[:space:]]*=' "$CONF_FILE" 2>/dev/null \
+        && note "$CONF_FILE uses ZONES=, which was split into SIGNED_ZONES= and UNSIGNED_ZONES= — the check refuses to run until you split it"
     true
 else
     printf '  install:   %s (from the example — EDIT IT)\n' "$CONF_FILE"
     run install -m 0600 -o root -g root dnscheck.env.example "$CONF_FILE"
-    note "edit $CONF_FILE: replace the placeholder NS, ZONES and HC_URL - the example ships documentation values only"
+    note "edit $CONF_FILE: replace the placeholder NS, SIGNED_ZONES/UNSIGNED_ZONES and HC_URL - the example ships documentation values only"
 fi
 say ''
 
@@ -226,7 +228,7 @@ verify before arming, in this order:
 
   3. the ALERT path, not just the ping path. Point it at a zone that is broken
      on purpose and confirm the notification actually reaches you:
-     sudo ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
+     sudo SIGNED_ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
 
   4. arm it
      sudo systemctl enable --now dnscheck.timer

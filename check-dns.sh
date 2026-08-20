@@ -30,7 +30,8 @@ check-dns.sh — authoritative DNS + DNSSEC health check
 
 Configuration (environment; normally /etc/dnscheck/dnscheck.env):
   NS          "label=ip" pairs, space separated
-  ZONES       zones to check, space separated
+  SIGNED_ZONES    zones served WITH DNSSEC — full checks
+  UNSIGNED_ZONES  zones served without it — reachability and agreement only
   VALIDATORS  recursive resolvers used to confirm the chain of trust
   WARN_DAYS   alarm when an RRSIG expires within this many days
   HC_URL      healthchecks.io ping URL (a credential; never in this file)
@@ -59,8 +60,8 @@ CONF_FILE=${DNSCHECK_CONF:-/etc/dnscheck/dnscheck.env}
 # they could not verify.
 #
 # PARSED, not sourced. The file's format is systemd's EnvironmentFile, and bash
-# disagrees with systemd about the most ordinary line in it: `ZONES=a.com b.com`
-# is one value to systemd, but to bash it is TWO assignments — ZONES becomes
+# disagrees with systemd about the most ordinary line in it: `SIGNED_ZONES=a.com b.com`
+# is one value to systemd, but to bash it is TWO assignments — SIGNED_ZONES becomes
 # just `a.com` and `b.com` becomes a stray variable nothing reads. No error.
 # A config listing three nameservers would quietly check one and report
 # "1 of 1 up": a green check that had stopped watching two thirds of what it
@@ -90,8 +91,8 @@ conf_get() {  # conf_get <file> <key>  -> prints the value, or nothing
     printf '%s' "$line"
 }
 
-for _v in NS ZONES VALIDATORS WARN_DAYS HC_URL; do
-    # An explicit ZONES=... on the command line wins over the file: the
+for _v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
+    # An explicit SIGNED_ZONES=... on the command line wins over the file: the
     # documented way to test the alert path is to point the check at a
     # deliberately broken zone, and that must not be silently overridden by the
     # configured one. Under systemd every value is already in the environment,
@@ -101,7 +102,7 @@ for _v in NS ZONES VALIDATORS WARN_DAYS HC_URL; do
 done
 unset _v _val
 
-# Defaults for the two settings that carry nothing site-specific. NS, ZONES and
+# Defaults for the two settings that carry nothing site-specific. NS, SIGNED_ZONES and
 # HC_URL deliberately have NO defaults: a built-in fallback for those is how a
 # misconfigured run looks like a passing one.
 : "${VALIDATORS:=1.1.1.1 8.8.8.8}"
@@ -122,7 +123,32 @@ cfg_missing() {
 }
 
 [[ -n ${NS:-}    ]] || cfg_missing NS
-[[ -n ${ZONES:-} ]] || cfg_missing ZONES
+# Either list alone is a valid configuration: a site with no signed zones is
+# not a misconfigured site.
+# ZONES was split into SIGNED_ZONES and UNSIGNED_ZONES. Refuse a config still
+# using it, rather than treating it as unset: an unread key is just an unused
+# variable, so the old name would parse fine, run fine, and check nothing —
+# and the check would go green having quietly stopped watching every zone in
+# it. Refusing is loud and takes one edit to clear.
+if [[ -z ${SIGNED_ZONES:-} && -z ${UNSIGNED_ZONES:-} ]]    && grep -qE '^[[:space:]]*ZONES[[:space:]]*=' "$CONF_FILE" 2>/dev/null; then
+    printf 'ZONES has been split in two, in %s:
+
+' "$CONF_FILE" >&2
+    printf '  SIGNED_ZONES=    zones served with DNSSEC — signatures and chain of trust checked
+' >&2
+    printf '  UNSIGNED_ZONES=  zones served without it — reachability and serial agreement only
+' >&2
+    printf '
+A zone in the wrong list is not cosmetic: an unsigned zone listed as signed
+' >&2
+    printf 'alarms constantly for RRSIGs that were never meant to exist, and a signed one
+' >&2
+    printf 'listed as unsigned has its signature expiry go unwatched.
+' >&2
+    exit 3
+fi
+
+[[ -n ${SIGNED_ZONES:-} || -n ${UNSIGNED_ZONES:-} ]] || cfg_missing 'SIGNED_ZONES or UNSIGNED_ZONES'
 # Not needed for --no-ping, which exists precisely so the checks can be
 # exercised before there is a healthchecks.io check to point at.
 ((no_ping)) || [[ -n ${HC_URL:-} ]] || cfg_missing HC_URL
@@ -138,7 +164,7 @@ now=$(date -u +%s)
 # than as a silent exit — an exit here would look identical to "all healthy"
 # to everything except the journal.
 command -v dig >/dev/null 2>&1 \
-    || { note 'dig is not installed (apt install bind9-dnsutils) — no checks ran'; ZONES=''; }
+    || { note 'dig is not installed (apt install bind9-dnsutils) — no checks ran'; SIGNED_ZONES=''; UNSIGNED_ZONES=''; }
 
 # RRSIG inception/expiry timestamps are YYYYMMDDHHMMSS, always UTC.
 epoch() {
@@ -185,7 +211,7 @@ check_rrsig() {
 # notes rather than returning them, so it must never run in a subshell — an
 # array appended to inside $(...) is discarded when the subshell exits.
 check_ns() {
-    local zone=$1 name=$2 ip=$3 out status flags soa_days
+    local zone=$1 name=$2 ip=$3 signed=$4 out status flags soa_days
     NS_SERIAL=''
     NS_RRSIG_DAYS=''
 
@@ -210,6 +236,17 @@ check_ns() {
 
     NS_SERIAL=$(awk '$4=="SOA"{print $7; exit}' <<<"$out")
     [[ -n $NS_SERIAL ]] || note "$zone @$name: NOERROR but no SOA record in the answer"
+
+    # Everything above applies to any zone. Everything below is DNSSEC, and
+    # only a zone DECLARED signed gets it — an unsigned zone has no RRSIGs to
+    # be missing, and reporting their absence as a fault would make the check
+    # permanently red for a zone that is working exactly as intended.
+    #
+    # Declared, not detected. Auto-detecting "this zone has no DNSKEY, so it
+    # must be unsigned" would mean that a zone whose signing STOPPED gets
+    # silently reclassified as fine — the precise failure this exists to catch.
+    # Which zones are signed is a fact about your intent, so you state it.
+    ((signed)) || return 0
 
     RRSIG_DAYS=''
     check_rrsig "$out" "$zone" "$name" SOA
@@ -239,12 +276,20 @@ soa_serial() {
 ns_total=$(wc -w <<<"$NS")
 v_total=$(wc -w <<<"$VALIDATORS")
 
-for zone in $ZONES; do
+# One list, each entry carrying whether DNSSEC is expected of it.
+zone_list=()
+for _z in ${SIGNED_ZONES:-};   do zone_list+=("1 $_z"); done
+for _z in ${UNSIGNED_ZONES:-}; do zone_list+=("0 $_z"); done
+unset _z
+
+for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
+    signed=${_entry%% *}
+    zone=${_entry#* }
     answered=0 serials='' min_days=''
 
     for pair in $NS; do
         name=${pair%%=*}; ip=${pair#*=}
-        if check_ns "$zone" "$name" "$ip"; then
+        if check_ns "$zone" "$name" "$ip" "$signed"; then
             ((answered++))
             [[ -n $NS_SERIAL ]] && serials+="$name:$NS_SERIAL "
             if [[ -n $NS_RRSIG_DAYS ]]; then
@@ -291,8 +336,23 @@ for zone in $ZONES; do
         vflags=" $(hdr_flags "$vout") "
         [[ -z $vout || $vflags == '  ' ]] && continue
         ((v_answered++))
-        [[ $vflags == *" ad "* ]] \
-            || note "$zone: no AD flag from $v — the DNSSEC chain is not validating"
+        if ((signed)); then
+            [[ $vflags == *" ad "* ]] \
+                || note "$zone: no AD flag from $v — the DNSSEC chain is not validating"
+        elif [[ $(hdr_status "$vout") == SERVFAIL ]]; then
+            # The failure mode unique to an unsigned zone. AD is absent by
+            # definition here, so its absence proves nothing — but SERVFAIL
+            # from a validating resolver, on a zone that should simply be
+            # insecure, usually means a DS record left behind at the parent.
+            # That breaks the zone for every validating resolver on the
+            # Internet while it still answers perfectly from its own
+            # nameservers — which is why only an outside view catches it.
+            note "$zone: SERVFAIL from $v — an unsigned zone that will not resolve usually means a stale DS at the parent"
+        elif [[ $vflags == *" ad "* ]]; then
+            # Config drift, in the expensive direction: the zone is signed and
+            # nobody told the check, so its signature expiry goes unwatched.
+            note "$zone: listed as unsigned but $v validates it — it IS signed; move it to SIGNED_ZONES so its signatures get monitored"
+        fi
     done
     (( v_answered == 0 )) \
         && note "$zone: no validator reachable ($VALIDATORS) — chain of trust unconfirmed"
@@ -300,7 +360,11 @@ for zone in $ZONES; do
     # Trimmed: serials accumulates a trailing space, which showed up in every
     # summary line as "ns3:2026080414 ,".
     serials_shown=${serials% }
-    info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, RRSIG ${min_days:-?}d left, $v_answered/$v_total validators AD"
+    if ((signed)); then
+        info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, RRSIG ${min_days:-?}d left, $v_answered/$v_total validators AD"
+    else
+        info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, unsigned, resolves at $v_answered/$v_total validators"
+    fi
 done
 
 # ------------------------------------------------------------------ report ---

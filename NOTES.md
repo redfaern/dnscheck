@@ -85,19 +85,49 @@ the email is a safety net, not a schedule.
 
 ## Design notes
 
+**Signed and unsigned zones are DECLARED, not detected.** `SIGNED_ZONES` gets
+the full DNSSEC checks; `UNSIGNED_ZONES` gets reachability, authority and serial
+agreement only. Both lists are optional individually — a site with no signed
+zones is not a misconfigured site.
+
+Auto-detecting it would be easy and wrong. "This zone has no DNSKEY, so it must
+be unsigned" reclassifies a zone whose signing has STOPPED as working exactly as
+intended — the precise failure the tool exists to catch, converted into silence.
+Being signed is a fact about your intent, so you state it, and moving a zone
+between the lists is the deliberate act of changing that intent.
+
+Both errors are caught rather than assumed away. An unsigned zone in
+`SIGNED_ZONES` alarms about RRSIGs that were never meant to exist, loudly and
+immediately. A signed zone in `UNSIGNED_ZONES` is reported the first time a
+validator returns AD for it — that direction is the expensive one, because the
+zone works fine while its signature expiry goes unwatched.
+
+**For unsigned zones the validator probe asks a different question.** AD is
+absent by definition, so its absence proves nothing. What is worth knowing is
+whether the zone RESOLVES: a SERVFAIL from a validating resolver usually means a
+DS record left behind at the parent, which breaks the zone for every validating
+resolver on the Internet while it still answers perfectly from its own
+nameservers. Nothing on the authoritative side can see that.
+
+**Serials are compared per zone, never between zones.** Every nameserver must
+agree about a given zone; two zones having different serials is normal and says
+nothing. The question being asked is "are all my nameservers serving the same
+version of this zone", which is a within-zone question.
+
+
 **The script reads its own config; it does not rely on systemd.** Under the
 timer, `EnvironmentFile=` and the script's own read are equivalent. By hand they
 are not — a terminal run gets no `EnvironmentFile`, so the script used to fall
 back to built-in defaults: checking whatever was compiled in rather than what is
 configured, and finding `HC_URL` empty. Every documented verification step is a
 manual run, which made the configuration the one thing they could not verify.
-`NS`, `ZONES` and `HC_URL` now have no defaults at all — a fallback for those is
+`NS`, the zone lists and `HC_URL` now have no defaults at all — a fallback for those is
 how a misconfigured run comes to look like a passing one.
 
 **The config is parsed, not sourced.** The format is systemd's
 `EnvironmentFile`, and bash disagrees with systemd about the most ordinary line
-in it: `ZONES=a.com b.com` is one value to systemd, but to bash it is two
-assignments — `ZONES` becomes just `a.com`, and `b.com` becomes a stray variable
+in it: `SIGNED_ZONES=a.com b.com` is one value to systemd, but to bash it is
+two assignments — it becomes just `a.com`, and `b.com` becomes a stray variable
 nothing reads. It does not error. A config listing three nameservers would
 quietly check one and report "1 of 1 up": a green check that had stopped
 watching two thirds of what it was pointed at.
@@ -181,10 +211,10 @@ sudo journalctl -u dnscheck -n 30 --no-pager
 # sudo on journalctl matters: without it you get "-- No entries --" rather
 # than an error, unless your account is in the adm or systemd-journal group.
 
-# 3. The ALERT path, not just the ping path. Point ZONES at a zone that is
+# 3. The ALERT path, not just the ping path. Point SIGNED_ZONES at a zone that is
 #    permanently broken on purpose (dnssec-failed.org is maintained for exactly
 #    this) and confirm the notification actually reaches you.
-sudo ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
+sudo SIGNED_ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
 
 # 4. Arm it.
 sudo systemctl enable --now dnscheck.timer
@@ -264,10 +294,12 @@ stopped" is declared. Ten extra minutes of certainty there is cheap; a false
   server that is down rather than one that has moved. Comparing the configured
   set against the parent's NS RRset would catch it — left out deliberately,
   because it means trusting a lookup to tell you whether lookups work.
-- **A zone is only checked once it is in `ZONES`.** Nothing discovers a newly
-  signed zone; adding one is a config edit. That is the same consent-by-edit
-  rule used elsewhere here, but it does mean a zone can be live and unmonitored
-  until someone remembers it.
+- **A zone is only checked once it is in one of the lists.** Nothing discovers
+  a new zone; adding one is a config edit, as is moving a newly signed zone from
+  `UNSIGNED_ZONES` to `SIGNED_ZONES`. That is the same consent-by-edit rule used
+  elsewhere here, and the AD-on-an-unsigned-zone check covers the second half of
+  it — but a zone can still be live and entirely unmonitored until someone
+  remembers to add it.
 - **Cross-attestation, unbuilt.** If the host already runs another monitor
   that reports on its own schedule over a different channel, having THAT one
   carry dnscheck's last-run timestamp as content would close the

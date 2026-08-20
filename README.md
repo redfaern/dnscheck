@@ -9,24 +9,37 @@ reports to healthchecks.io, which owns notification and the dead-man's switch.
 
 ## What it checks
 
+Zones are declared in two lists. **Both** lists get the service checks;
+`SIGNED_ZONES` additionally gets the DNSSEC ones.
+
 Per zone, against each nameserver you list:
 
 - **Reachability** — the server answers at all, within 6s.
 - **Authority** — the answer carries the `AA` flag. A box that has dropped your
   zone still replies; "replied" is not "still authoritative".
-- **Agreement** — SOA serials match across all three. A mismatch is re-checked
-  after 20s before it is reported, because disagreeing for a few seconds after
-  a NOTIFY is normal, healthy behaviour.
-- **Signing** — an `RRSIG` exists over both the SOA and the DNSKEY RRset, and
+- **Agreement** — SOA serials match across every nameserver, per zone. Zones are
+  compared against themselves, never against each other: two zones having
+  different serials is normal, three nameservers disagreeing about one zone is
+  not.
+  A mismatch is re-checked after 20s before it is reported, because disagreeing
+  for a few seconds after a NOTIFY is normal, healthy behaviour.
+- **Signing** *(signed zones)* — an `RRSIG` exists over both the SOA and the DNSKEY RRset, and
   neither expires within `WARN_DAYS`. The DNSKEY signatures are checked
   separately because the KSK resigns on its own schedule and can stall while
   the SOA's signatures still look fresh.
-- **Chain of trust** — two public validators return the `AD` flag for a
-  *random, never-before-queried* label in the zone. Random because the apex
-  sits in every resolver's cache, so asking for it can return a validated
-  answer from before the breakage; and a random label also exercises the
-  NSEC/NSEC3 denial-of-existence proof, which is the half of DNSSEC that breaks
-  quietly.
+- **Chain of trust** *(signed zones)* — two public validators return the `AD`
+  flag for a *random, never-before-queried* label in the zone. Random because
+  the apex sits in every resolver's cache, so asking for it can return a
+  validated answer from before the breakage; and a random label also exercises
+  the NSEC/NSEC3 denial-of-existence proof, which is the half of DNSSEC that
+  breaks quietly.
+- **Resolvability** *(unsigned zones)* — the same random label must not draw a
+  `SERVFAIL` from a validating resolver. An unsigned zone cannot produce `AD`,
+  so its absence proves nothing; but SERVFAIL usually means a DS record left
+  behind at the parent, which breaks the zone for every validating resolver on
+  the Internet while it still answers perfectly from its own nameservers. Only
+  an outside view catches that. If `AD` *does* appear, the zone is signed and
+  in the wrong list — reported, so its signature expiry does not go unwatched.
 
 Nothing listens on a port. The only outbound destination is healthchecks.io.
 
