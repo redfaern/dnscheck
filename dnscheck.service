@@ -23,14 +23,21 @@ ExecStart=/usr/local/lib/dnscheck/check-dns.sh
 
 # A hung dig must not leave a run wedged until the next one collides with it.
 #
-# Sized for the WORST case, which is a total outage: every one of the 18
-# authoritative queries burning its full +time=3 +tries=2 (108s), both
-# validators timing out on all three zones (60s), the mismatch re-check, and a
-# retrying curl. That is the run that most needs to finish, because it is the
-# one carrying the /fail ping. A 180s cap would SIGKILL it mid-report and turn
-# "DNS is down" into "the check went silent" — the same alert, a grace period
-# later, with none of the detail.
-RuntimeMaxSec=300
+# TimeoutStartSec=, NOT RuntimeMaxSec=. For Type=oneshot systemd ignores
+# RuntimeMaxSec= outright — it logs "has no effect in combination with
+# Type=oneshot. Ignoring." and carries on with NO cap at all, because a oneshot
+# service also defaults TimeoutStartSec= to infinity. The unit would have looked
+# bounded while being unbounded, and a wedged dig would have blocked every
+# subsequent firing (systemd will not start a second instance while the first
+# still runs) until the dead-man switch noticed the silence.
+#
+# Sized for the WORST case, which is a total outage: every authoritative query
+# burning its full +time=3 +tries=2, both validators timing out on every zone,
+# the mismatch re-check, and a retrying curl. That is the run that most needs to
+# finish, because it is the one carrying the /fail ping. Too low a cap kills it
+# mid-report and turns "DNS is down" into "the check went silent" — the same
+# alert, a grace period later, with none of the detail.
+TimeoutStartSec=300
 
 # Nothing here writes a file, opens a socket that listens, or needs a
 # capability. Say so, so a compromised dig or curl has nowhere to go.

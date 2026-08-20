@@ -297,7 +297,10 @@ for zone in $ZONES; do
     (( v_answered == 0 )) \
         && note "$zone: no validator reachable ($VALIDATORS) — chain of trust unconfirmed"
 
-    info "$zone: $answered/$ns_total NS up, serial ${serials:-none}, RRSIG ${min_days:-?}d left, $v_answered/$v_total validators AD"
+    # Trimmed: serials accumulates a trailing space, which showed up in every
+    # summary line as "ns3:2026080414 ,".
+    serials_shown=${serials% }
+    info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, RRSIG ${min_days:-?}d left, $v_answered/$v_total validators AD"
 done
 
 # ------------------------------------------------------------------ report ---
