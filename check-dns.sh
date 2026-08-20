@@ -412,7 +412,13 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # The rcode does not matter here; the AD flag does.
     v_answered=0 v_ad=0 no_ad=''
     for v in $VALIDATORS; do
-        label="dnscheck-$RANDOM$RANDOM.$zone"
+        # Timestamp AND randomness. $RANDOM alone is 0-32767 and its
+        # concatenation is not uniform, so a label CAN repeat — and a repeat
+        # inside the zone's negative-cache TTL (the SOA minimum, commonly an
+        # hour) would be answered from cache, quietly turning the one query
+        # that must not be cached into one that was. The epoch second makes a
+        # collision impossible between runs rather than merely unlikely.
+        label="dnscheck-$(date -u +%s)-$RANDOM.$zone"
         vout=$(dig +dnssec +time=5 +tries=2 @"$v" "$label" A 2>/dev/null)
         vflags=" $(hdr_flags "$vout") "
         [[ -z $vout || $vflags == '  ' ]] && continue

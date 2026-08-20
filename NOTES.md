@@ -120,6 +120,30 @@ The first version reported eight problems for an unsigned zone added to
 leave you to work out the diagnosis are worse than one line that has already
 done it — an alert is only worth sending if it tells you what to do.
 
+**There is no way to tell a public resolver to skip its cache, so the query is
+made uncacheable instead.** DNS has no "bypass cache" flag — recursion either
+happens or it does not — and 1.1.1.1 will not take instructions about its own
+cache. What CAN be controlled is the name asked about: a label that has never
+been queried has nothing cached against it, so the resolver is forced to do the
+work now. The label carries the epoch second as well as a random number,
+because `$RANDOM` alone can repeat, and a repeat inside the zone's negative-
+cache TTL would be served from cache — quietly turning the one query that must
+not be cached into one that was.
+
+**What remains cached, and why that is correct.** The label is fresh, but the
+material used to validate it — the parent's DS, the zone's DNSKEY, the NS
+records — is cached by the resolver for its TTL. So a chain that broke five
+minutes ago can still validate until that cached material expires. This is not
+worked around, because it is not an error: the resolver's cache state IS what
+real users experience. A probe that bypassed it would report a breakage nobody
+is yet suffering, and, more misleadingly, report one as fixed before it
+actually is for anyone.
+
+The consequence to accept: a broken chain is detected within the DNSKEY/DS TTL
+rather than instantly. Closing that gap properly means comparing the parent's
+DS against the zone's DNSKEY directly from the authoritative servers, where no
+resolver cache is involved at all — see "Still open".
+
 **For unsigned zones the validator probe asks a different question.** AD is
 absent by definition, so its absence proves nothing. What is worth knowing is
 whether the zone RESOLVES: a SERVFAIL from a validating resolver usually means a
