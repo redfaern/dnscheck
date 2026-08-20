@@ -7,7 +7,7 @@ OnCalendar=hourly
 
 # Never on the hour. Every naive cron job on the Internet fires at :00, and the
 # resolvers and healthchecks.io both see that spike. Also stops this colliding
-# with mcsuper's hourly timers on the same box.
+# with whatever else the box runs on the hour.
 RandomizedDelaySec=300
 
 # ...but the SAME offset every time. By default systemd re-rolls the delay

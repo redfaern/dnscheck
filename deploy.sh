@@ -231,7 +231,8 @@ verify before arming, in this order:
   4. arm it
      sudo systemctl enable --now dnscheck.timer
 
-healthchecks.io: period 1 hour, grace 15 min, its OWN uuid (never mcsuper's).
+healthchecks.io: period 1 hour, grace 15 min, on a uuid of its OWN — never one
+shared with another check.
 Reminders: Account Settings > Email Reports > daily.
 
 Step 3 is the one people skip. A dead-man switch you have never seen trip is a

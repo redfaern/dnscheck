@@ -260,7 +260,7 @@ for zone in $ZONES; do
     # A serial mismatch is NORMAL for the seconds it takes a NOTIFY to
     # propagate. Alarming on first sight would page you for healthy behaviour,
     # and an alert that cries wolf hourly is an alert you stop reading.
-    # Confirm it persists — the same two-strikes rule the Minecraft watchdog uses.
+    # Confirm it persists first: two strikes, not one.
     distinct=$(tr ' ' '\n' <<<"$serials" | sed 's/.*://' | sort -u | grep -c .)
     if (( distinct > 1 )); then
         sleep 20

@@ -70,7 +70,7 @@ a three-day outage is 72 messages and a filter rule, which is how a backstop
 stops being one.
 
 **Account-wide is a feature here.** The reminder covers every down check in the
-account, so it nags for the Minecraft dead-man switch too, without a second
+account, so it nags for every other check you have there too, without a second
 thing to configure.
 
 **Declined: Pushover on Emergency priority.** It repeats every 5 minutes until
@@ -134,11 +134,13 @@ a SOA-only check misses a stalled KSK resign until the zone goes dark.
 **Serial mismatch needs two strikes.** Serials disagreeing for a few seconds
 after a NOTIFY is normal, healthy behaviour. Alarming on first sight pages you
 for a working system. The script re-queries after 20s and only reports a
-mismatch that survives — the same rule the Minecraft watchdog uses for RCON.
+mismatch that survives: two strikes, not one.
 
-**Its own healthchecks UUID.** Sharing mcsuper's would let a healthy Minecraft
-update keep the DNS check looking alive, which is precisely the failure a
-dead-man switch exists to catch. Same argument as "only `mcsuper update` pings".
+**Its own healthchecks UUID.** Sharing one with another check would let that
+check's healthy pings keep this one looking alive, which is precisely the
+failure a dead-man switch exists to catch. The same argument is why only one
+thing here ever pings: a second emitter on the same uuid keeps the switch quiet
+for a monitor that has stopped.
 
 **systemd, not cron.** A timer gives overlap protection (a second start while
 one is running is queued, not run concurrently), `RuntimeMaxSec` for a hung
@@ -215,7 +217,7 @@ and confirm the up transition arrives too.
 | Grace | 15 min — see the arithmetic below |
 | Integration | ntfy → the dnscheck topic, on THIS check only |
 | Reminders | Account Settings › Email Reports › daily (account-wide) |
-| UUID | its own, never mcsuper's |
+| UUID | its own, never shared with another check |
 
 The delivery choice lives here and nowhere else, which is the point: changing
 how you are told is a web-UI edit, not a change to a script running as root's
@@ -266,13 +268,13 @@ stopped" is declared. Ten extra minutes of certainty there is cheap; a false
   signed zone; adding one is a config edit. That is the same consent-by-edit
   rule used elsewhere here, but it does mean a zone can be live and unmonitored
   until someone remembers it.
-- **Cross-attestation with mcsuper, unbuilt.** mcsuper's weekly heartbeat
-  already reports the backup and watch timestamps as content, so one pulse
-  attests to all three timers (SPEC 7.3). Adding dnscheck's last-run timestamp
-  to that body would close the "healthchecks.io itself is down" gap over a
-  genuinely independent channel — without giving this script a second emitter,
-  because the reporting still happens inside `mcsuper update`. Cheap, and the
-  right shape. Say the word and I will do it as an mcsuper change.
+- **Cross-attestation, unbuilt.** If the host already runs another monitor
+  that reports on its own schedule over a different channel, having THAT one
+  carry dnscheck's last-run timestamp as content would close the
+  "healthchecks.io itself is unreachable" gap — a stale date in a message that
+  still arrives. It costs this script nothing and adds no second emitter here,
+  because the reporting happens entirely in the other tool. Not built: it
+  belongs in whatever that other monitor is, not in this repo.
 - **No DS-vs-DNSKEY comparison at the parent.** The AD-flag probe catches a
   broken DS *after* it breaks. Comparing the parent's DS to the zone's DNSKEY
   would catch a mismatched key mid-rollover, before it breaks. Deliberately left
