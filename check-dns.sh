@@ -23,6 +23,10 @@ usage() {
     cat <<'USAGE'
 check-dns.sh — authoritative DNS + DNSSEC health check
 
+  --show-config
+              print the settings this run would use, and where each came
+              from, then exit. Answers "why is it this", which grepping the
+              file cannot.
   --no-ping   run every check and print the report, but do not contact
               healthchecks.io — so a test run cannot mark the check up,
               or fire a false alert.
@@ -39,9 +43,11 @@ USAGE
 }
 
 no_ping=0
+show_cfg=0
 while (($#)); do
     case $1 in
         --no-ping) no_ping=1 ;;
+        --show-config) show_cfg=1 ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
@@ -91,14 +97,27 @@ conf_get() {  # conf_get <file> <key>  -> prints the value, or nothing
     printf '%s' "$line"
 }
 
+declare -A _src=()
 for _v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
     # An explicit SIGNED_ZONES=... on the command line wins over the file: the
     # documented way to test the alert path is to point the check at a
     # deliberately broken zone, and that must not be silently overridden by the
     # configured one. Under systemd every value is already in the environment,
     # so this branch is what makes the timer and a manual run agree.
-    [[ -n ${!_v+set} ]] && continue
-    _val=$(conf_get "$CONF_FILE" "$_v") && printf -v "$_v" '%s' "$_val"
+    #
+    # Where each value came from is recorded as it is resolved, so
+    # --show-config can answer "why is it this" and not merely "what is it".
+    # A setting that is right by accident — inherited from the environment,
+    # or a default standing in for a line you thought you had edited — reads
+    # identically to one that is right on purpose, until something asks.
+    if [[ -n ${!_v+set} ]]; then
+        _src[$_v]=environment
+        continue
+    fi
+    if _val=$(conf_get "$CONF_FILE" "$_v"); then
+        printf -v "$_v" '%s' "$_val"
+        _src[$_v]=config
+    fi
 done
 unset _v _val
 
@@ -107,6 +126,54 @@ unset _v _val
 # misconfigured run looks like a passing one.
 : "${VALIDATORS:=1.1.1.1 8.8.8.8}"
 : "${WARN_DAYS:=7}"
+[[ -n ${_src[VALIDATORS]:-} ]] || _src[VALIDATORS]=default
+[[ -n ${_src[WARN_DAYS]:-}  ]] || _src[WARN_DAYS]=default
+
+# --show-config: what the run will ACTUALLY use, and where each value came
+# from. Not the same question as "what is in the file", which is all that
+# grep can answer — it cannot show a quote that was stripped, a default that
+# filled a gap, an environment variable that won, or which of two duplicate
+# lines was taken.
+show_config() {
+    local v val src n
+    printf '%-15s %s
+' 'config file' "$CONF_FILE"
+    if [[ -r $CONF_FILE ]]; then
+        printf '%-15s %s
+' '' 'readable'
+    elif [[ -e $CONF_FILE ]]; then
+        printf '%-15s %s
+' '' "NOT READABLE by $(id -un) — values below are environment and defaults only"
+    else
+        printf '%-15s %s
+' '' 'does not exist'
+    fi
+    printf '
+%-15s %-12s %s
+' 'SETTING' 'FROM' 'VALUE'
+    for v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
+        val=${!v:-}
+        src=${_src[$v]:-unset}
+        if [[ $v == HC_URL ]]; then
+            # A credential. Shown as enough to tell two uuids apart and no
+            # more, because the whole point of this flag is that its output
+            # gets pasted somewhere to ask a question about it.
+            [[ -n $val ]] && val="${val%"${val#*//*/????}"}…redacted" || val=''
+        fi
+        n=''
+        case $v in
+            NS|SIGNED_ZONES|UNSIGNED_ZONES|VALIDATORS)
+                [[ -n $val ]] && n="  ($(wc -w <<<"$val"))" ;;
+        esac
+        printf '%-15s %-12s %s%s
+' "$v" "$src" "${val:-—}" "$n"
+    done
+}
+
+# Before the config VALIDATION below, deliberately: an incomplete or wrong
+# config is exactly when you want to see what was actually read, and a flag
+# that only works once everything is already correct is a flag for nobody.
+((show_cfg)) && { show_config; exit 0; }
 
 cfg_missing() {
     printf 'missing %s.\n\n' "$1" >&2

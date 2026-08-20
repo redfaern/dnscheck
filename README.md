@@ -76,6 +76,19 @@ and never arms the timer. Configuration and arming are yours.
 contacting healthchecks.io, so testing a change cannot mark the check up or fire
 a false alert.
 
+To see what a run would actually use, and where each value came from:
+
+```sh
+sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+```
+
+That is not the same question as "what is in the file", which is all `grep` can
+answer — it cannot show a quote that was stripped, a default that filled a gap,
+an environment variable that won, or which of two duplicate lines was taken.
+`HC_URL` is shown truncated, since it is a credential and this output is the
+kind that gets pasted somewhere. It works before the config is valid, which is
+when you most need it.
+
 The script parses `/etc/dnscheck/dnscheck.env` itself rather than depending on
 systemd to hand it over, so a run by hand and a run under the timer check the
 same thing. That file is 0600 root:root, so **run it with sudo** — otherwise it
