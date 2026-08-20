@@ -125,7 +125,12 @@ unset _v _val
 # HC_URL deliberately have NO defaults: a built-in fallback for those is how a
 # misconfigured run looks like a passing one.
 : "${VALIDATORS:=1.1.1.1 8.8.8.8}"
-: "${WARN_DAYS:=7}"
+# 3, not 7. This is measured against the floor of the RESIGNING cycle, not the
+# signature's validity: BIND's default policy signs for 14 days and refreshes 5
+# days before expiry, so remaining life sawtooths between 14 and 5 and is meant
+# to. Any threshold inside that band alarms on a healthy zone — 7 would fire for
+# two days out of every nine, forever.
+: "${WARN_DAYS:=3}"
 [[ -n ${_src[VALIDATORS]:-} ]] || _src[VALIDATORS]=default
 [[ -n ${_src[WARN_DAYS]:-}  ]] || _src[WARN_DAYS]=default
 

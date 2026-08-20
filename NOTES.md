@@ -102,6 +102,22 @@ immediately. A signed zone in `UNSIGNED_ZONES` is reported the first time a
 validator returns AD for it — that direction is the expensive one, because the
 zone works fine while its signature expiry goes unwatched.
 
+**`WARN_DAYS` is measured against the resigning floor, not the signature
+lifetime.** BIND's default policy issues RRSIGs valid for 14 days and refreshes
+them 5 days before expiry, so remaining life sawtooths between 14 and 5. It is
+*supposed* to reach 5 and jump back. A threshold anywhere in that band fires on
+a healthy zone: 7 would alarm for the two days of every nine-day cycle the zone
+spends between 7 and 5 days left — about a fifth of all time, permanently.
+
+The shipped value is 3, two days under the refresh point, leaving room for the
+resign itself, the transfer to the secondaries, and the jitter BIND applies so
+signatures do not all come due together. Hitting 3 means resigning is two days
+overdue, with three days left before validating resolvers begin to fail.
+
+The general rule, for any policy: a couple of days below the REFRESH threshold.
+Deriving it from the validity interval instead is the mistake — those are
+different numbers, and only one of them is the floor.
+
 **A missing signature is diagnosed once, by the zone, not six times by the
 nameservers.** One nameserver cannot tell "signing broke on this box" from
 "this zone was never signed and is in the wrong list", and those two want
