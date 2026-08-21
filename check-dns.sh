@@ -546,7 +546,19 @@ check_ns() {
 
     status=$(hdr_status "$out")
     if [[ $status != NOERROR ]]; then
-        note "$zone @$name: SOA query returned ${status:-no rcode}"
+        # REFUSED is worth naming. The others mean the query went wrong;
+        # REFUSED means the server answered and declined, and by far the
+        # commonest cause is that it is not authoritative for this zone at
+        # all — a RECURSIVE resolver, which returns REFUSED to the
+        # non-recursive query used here. That is a natural mistake to make
+        # for an internal zone, where the box serving it is usually a
+        # resolver with local data rather than an authoritative server, and
+        # "SOA query returned REFUSED" on its own sends you to look at ACLs.
+        if [[ $status == REFUSED ]]; then
+            note "$zone @$name ($ip): SOA query REFUSED — this column wants an AUTHORITATIVE server, and a recursive resolver refuses the non-recursive query used here. If $ip is a resolver rather than a nameserver for $zone, it belongs in the validators column instead. Otherwise check its ACLs."
+        else
+            note "$zone @$name: SOA query returned $status"
+        fi
         return 1
     fi
 
@@ -746,7 +758,7 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     [[ -n $servfail_from ]] \
         && note "$zone: SERVFAIL from ${servfail_from% } — an unsigned zone that will not resolve usually means a stale DS at the parent"
     [[ -n $ad_unexpected ]] \
-        && note "$zone: listed as unsigned but ${ad_unexpected% } validates it — it IS signed; move it to SIGNED_ZONES so its signatures get monitored"
+        && note "$zone: listed as unsigned but ${ad_unexpected% } validates it — it IS signed; change its state column to 'signed' so its signatures get monitored"
 
     # Now enough is known to say which of the two very different things an
     # absence of signatures means.
@@ -767,7 +779,7 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
             # that was never signed, sitting in the wrong list. ONE line that
             # names the cause, rather than eight that each report a symptom.
             # The missing AD is the same fact restated, so it is not repeated.
-            note "$zone: listed as signed, but NO nameserver serves signatures and no validator sees AD — this is an unsigned zone; move it to UNSIGNED_ZONES"
+            note "$zone: listed as signed, but NO nameserver serves signatures and no validator sees AD — this is an unsigned zone; change its state column to 'unsigned'"
         else
             # Partial, and therefore real. A zone that is signed, with one
             # server no longer serving the signatures, is exactly the fault a
