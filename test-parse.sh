@@ -153,5 +153,20 @@ is 'threshold 3: five days left is quiet' "${#problems[@]}" '0'
 problems=(); WARN_ACTIVE=9;  check_rrsig "$rrset" a.com ns1 SOA >/dev/null
 is 'threshold 9: the same signature alarms' "${#problems[@]}" '1'
 is 'and says how long is left' "${problems[0]#*RRSIG }" "expires in 5d ($sig5)"
+
+# Two separators for one kind of value is a trap at the moment a list gets
+# copied between the two files. The zone table has no choice — a space there
+# starts a new column — so dnscheck.env takes either and normalises.
+cat > "$TD/env-commas" <<'CONF'
+NS=ns1=192.0.2.1,ns2=192.0.2.2
+VALIDATORS=1.1.1.1,8.8.8.8
+WARN_DAYS=3
+HC_URL=https://hc-ping.com/x
+CONF
+printf 'a.com signed - - -\n' > "$TD/zones"
+is 'commas in dnscheck.env resolve as spaces do' \
+   "$(DNSCHECK_CONF="$TD/env-commas" DNSCHECK_ZONES="$TD/zones" bash "$SCRIPT" --show-config 2>&1 |
+      sed -n '/^ZONE  */,$p' | tail -n +2 | sed 's/  */ /g;s/ $//')" \
+   'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 (( fail == 0 ))

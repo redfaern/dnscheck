@@ -140,6 +140,16 @@ unset _v _val
 [[ -n ${_src[VALIDATORS]:-} ]] || _src[VALIDATORS]=default
 [[ -n ${_src[WARN_DAYS]:-}  ]] || _src[WARN_DAYS]=default
 
+# One separator, both files. A list in the zone table MUST use commas — spaces
+# there separate the five columns, so there is no choice about it — while a
+# list here has always used spaces. Two formats for the same kind of value is
+# a trap for exactly the moment you copy a row's nameservers up here as the
+# default, or a default down into a row. So accept either in this file and
+# normalise; the zone table keeps its commas because it cannot do otherwise,
+# and --show-config prints the resolved form so the two always look alike.
+NS=${NS//,/ }
+VALIDATORS=${VALIDATORS//,/ }
+
 # --show-config: what the run will ACTUALLY use, and where each value came
 # from. Not the same question as "what is in the file", which is all that
 # grep can answer — it cannot show a quote that was stripped, a default that

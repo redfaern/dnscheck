@@ -5,7 +5,10 @@
 #   <zone>  <signed|unsigned>  <warn-days|->  <label=ip,...|->  <ip,...|none|->
 #
 # "-" in any column means "use the default from dnscheck.env". Lists inside a
-# column are separated by COMMAS, never spaces, so the columns stay columns.
+# column are separated by COMMAS, never spaces, so the columns stay columns —
+# a space is what tells one column from the next, so a list containing one
+# would silently become two columns. dnscheck.env accepts commas too, so the
+# same list can be pasted either way round without editing.
 # Anything after a '#' is a comment, and commenting out a row is how you stop
 # checking a zone for an afternoon without losing what it said.
 #
