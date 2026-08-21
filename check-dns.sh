@@ -717,9 +717,26 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
             # server no longer serving the signatures, is exactly the fault a
             # per-zone summary would have hidden — so name the server.
             (( u_count > 0 ))                 && note "$zone: no RRSIG from ${unsigned_ns% } while other nameservers serve them — signing has stopped on that server"
-            for v in $no_ad; do
-                note "$zone: no AD flag from $v — the DNSSEC chain is not validating"
-            done
+            if [[ -n $no_ad ]]; then
+                if (( u_count == 0 && v_ad == 0 )); then
+                    # Signatures on every nameserver that answered, and AD from
+                    # none. Signing is therefore NOT the problem, and saying
+                    # "the chain is not validating" sends you to look at the
+                    # nameservers, which are fine. What is missing is the
+                    # parent's DS record: without it a resolver has no reason
+                    # to believe this zone is signed, so it never checks. That
+                    # is exactly the state a zone sits in between "we signed
+                    # it" and "the registry published the DS", and it is a
+                    # different thing from a broken chain — the zone still
+                    # resolves for everyone, it is merely insecure.
+                    note "$zone: every nameserver serves signatures but no validator sees AD (${no_ad% }) — the parent's DS record is missing or does not match, so the zone is insecure rather than broken. Until the DS is published, mark this zone 'unsigned' in the zone table."
+                else
+                    # Some validators see the chain and these do not, so the
+                    # fault is theirs or the path to them — named together,
+                    # because it is one finding about several resolvers.
+                    note "$zone: no AD flag from ${no_ad% } — the DNSSEC chain is not validating there, though other validators see it"
+                fi
+            fi
         fi
     fi
 
@@ -803,6 +820,11 @@ if (( ${#problems[@]} )); then
     # answer" is a different problem from "ns3 did not answer and the other
     # two disagree about the serial", and the difference is in these lines.
     (( ${#summary[@]} )) && printf '%s\n' "${summary[@]}"
+    # A verdict, last. Under systemd the exit status IS the verdict and systemd
+    # announces it; by hand nothing does, and the run ends on summary lines
+    # that read as healthy whatever came before them. So a run by hand looked
+    # fine while returning 1. One line, stating which it was.
+    printf 'FAILED — %d problem(s), %d zone(s) checked\n' "${#problems[@]}" "$Z_COUNT" >&2
     (( no_ping )) && exit 1
     ping_hc "${HC_URL%/}/fail" 2 \
         || echo 'dead-man ping FAILED — healthchecks.io was not told about the failure' >&2
@@ -810,6 +832,7 @@ if (( ${#problems[@]} )); then
 fi
 
 (( ${#summary[@]} )) && printf '%s\n' "${summary[@]}"
+printf 'OK — %d zone(s) checked, no problems\n' "$Z_COUNT"
 (( no_ping )) && exit 0
 # Retries on the success path too: a missed ping is not a missed message, it is
 # an ALARM. Crying wolf teaches you to ignore the one signal whose entire
