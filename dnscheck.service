@@ -31,13 +31,22 @@ ExecStart=/usr/local/lib/dnscheck/check-dns.sh
 # subsequent firing (systemd will not start a second instance while the first
 # still runs) until the dead-man switch noticed the silence.
 #
-# Sized for the WORST case, which is a total outage: every authoritative query
-# burning its full +time=3 +tries=2, both validators timing out on every zone,
-# the mismatch re-check, and a retrying curl. That is the run that most needs to
-# finish, because it is the one carrying the /fail ping. Too low a cap kills it
-# mid-report and turns "DNS is down" into "the check went silent" — the same
-# alert, a grace period later, with none of the detail.
-TimeoutStartSec=300
+# Sized for the WORST case, which is a total outage: every query burning its
+# full timeout and retries. Per zone that is 2 queries x 3s x 2 tries for each
+# nameserver, plus 2 queries x 5s x 2 tries for each validator, plus a possible
+# 20s mismatch re-check; call it 100s a zone for a typical three-server,
+# two-validator setup, and add a retrying curl at the end.
+#
+# That is the run that most needs to finish, because it is the one carrying the
+# /fail ping. Too low a cap kills it mid-report and turns "DNS is down" into
+# "the check went silent" — the same alert, a grace period later, with none of
+# the detail. So this is deliberately generous rather than tight: the only
+# thing it has to beat is the hourly timer, since systemd will not start a
+# second run while the first is going.
+#
+# Raise it if you add zones. At roughly 100s each, 900 covers about eight in
+# total outage, and a healthy run takes a second or two.
+TimeoutStartSec=900
 
 # Nothing here writes a file, opens a socket that listens, or needs a
 # capability. Say so, so a compromised dig or curl has nowhere to go.

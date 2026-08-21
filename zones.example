@@ -61,14 +61,29 @@
 #
 # These check the zone from OUTSIDE, which is the only way to catch a fault
 # that is invisible from the nameservers themselves: a broken chain of trust,
-# or a DS record left behind at the parent after a zone was unsigned.
+# a DS record left behind at the parent after a zone was unsigned, or a
+# delegation that has gone missing at the registry.
+#
+# Each validator is asked two questions. First for the zone's apex SOA, which
+# proves it reached YOUR ZONE rather than an ancestor's opinion of it — ask any
+# validating resolver about a name under a delegation that no longer exists and
+# it returns NXDOMAIN with the AD flag set, because the PARENT's proof of
+# nonexistence validates perfectly. Then for a random label that has never been
+# queried, which forces a fresh resolution and exercises the NSEC/NSEC3 denial
+# of existence, the half of DNSSEC that breaks quietly. A signed zone must
+# validate on both.
 #
 # "none" for a zone no outside resolver can see — an internal zone on a private
 # TLD, for instance. Say so explicitly, because the alternative is worse than
-# it looks: a public resolver asked about example.lan returns NXDOMAIN, the
-# check counts that as an answer, and the zone reports healthy forever while
-# nothing about it has been verified. If you have an internal validating
-# resolver, name it here instead and get the real check back.
+# it looks: a resolver asked about a name under a TLD that does not exist gets
+# a signed proof from the ROOT that it does not, which validates — so the zone
+# can look both resolvable and correctly signed while nothing about it has been
+# verified at all.
+#
+# Naming an internal resolver here only helps if it actually SERVES the zone.
+# A forwarder that does not hold it will pass the query upstream, and what
+# comes back is the root's opinion, not your zone's. The apex-SOA question
+# above is what tells those two apart.
 #
 # ---------------------------------------------------------------------------
 # Replace every row below. These are documentation values.

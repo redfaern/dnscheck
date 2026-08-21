@@ -705,9 +705,61 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     # return a validated answer from before the breakage. A name that has never
     # been queried forces a full resolution now, and exercises the NSEC/NSEC3
     # denial-of-existence proof — the half of DNSSEC that breaks quietly.
-    # The rcode does not matter here; the AD flag does.
-    v_answered=0 v_ad=0 no_ad='' ad_from='' resolved_by='' ad_unexpected='' servfail_from=''
+    # The zone, seen from outside, in two queries per validator.
+    #
+    # 1. THE APEX SOA, first, and everything else depends on it. It is the only
+    #    thing that proves this resolver reached YOUR ZONE rather than an
+    #    ancestor's opinion of it. Without it the whole check could be
+    #    satisfied by a parent proving the zone does not exist: ask any
+    #    validating resolver for a name under a delegation that is gone, and
+    #    it returns NXDOMAIN with AD set, because the PARENT's proof of
+    #    nonexistence validates perfectly. Verified live:
+    #
+    #      dig +dnssec @1.1.1.1 nothing.invalidtld-xyz A
+    #      status: NXDOMAIN ... flags: qr rd ra ad
+    #
+    #    So a zone whose delegation had been removed at the registry would
+    #    have passed here — its own nameservers still serving it happily,
+    #    every authoritative check green, and the one test that looks from
+    #    outside satisfied by the proof that it is gone. Green, worldwide
+    #    unreachable. That is the exact failure an outside view exists to
+    #    catch, so the outside view has to start by resolving the zone.
+    #
+    #    It also makes AD MEAN something for an unsigned zone. AD on a
+    #    positive answer at the apex can only come from the zone itself being
+    #    signed; an ancestor cannot manufacture one. AD on a denial can, which
+    #    is why the "listed as unsigned but it validates" test used to fire on
+    #    zones under a TLD that simply does not exist.
+    #
+    # 2. A RANDOM LABEL, second, for the other half of DNSSEC. The apex sits in
+    #    every resolver's cache for its TTL, so a positive answer can predate a
+    #    breakage; a name never queried before forces a resolution now and
+    #    exercises the NSEC/NSEC3 denial-of-existence proof, which is the half
+    #    that breaks quietly. Both halves must validate.
+    v_answered=0 v_ad=0 no_ad='' ad_from='' resolved_by='' ad_unexpected=''
+    servfail_from='' unresolved_from='' no_nsec_ad=''
     for v in $zone_val_list; do
+        sout=$(dig +dnssec +time=5 +tries=2 @"$v" "$zone" SOA 2>/dev/null)
+        sflags=" $(hdr_flags "$sout") "
+        [[ -z $sout || $sflags == '  ' ]] && continue
+        ((v_answered++))
+        sstatus=$(hdr_status "$sout")
+
+        if [[ $sstatus == SERVFAIL ]]; then
+            servfail_from+="$v "
+            continue
+        fi
+        # NXDOMAIN, or NOERROR with no SOA in it, both mean the same thing:
+        # this resolver cannot produce the zone. Reported together, because
+        # the distinction is a detail and the consequence is identical.
+        if [[ $sstatus != NOERROR ]] || ! awk '$4=="SOA"{f=1} END{exit !f}' <<<"$sout"; then
+            unresolved_from+="$v "
+            continue
+        fi
+
+        soa_ad=0
+        [[ $sflags == *" ad "* ]] && soa_ad=1
+
         # Timestamp AND randomness. $RANDOM alone is 0-32767 and its
         # concatenation is not uniform, so a label CAN repeat — and a repeat
         # inside the zone's negative-cache TTL (the SOA minimum, commonly an
@@ -717,30 +769,22 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
         label="dnscheck-$(date -u +%s)-$RANDOM.$zone"
         vout=$(dig +dnssec +time=5 +tries=2 @"$v" "$label" A 2>/dev/null)
         vflags=" $(hdr_flags "$vout") "
-        [[ -z $vout || $vflags == '  ' ]] && continue
-        ((v_answered++))
+        nsec_ad=0
+        [[ $vflags == *" ad "* ]] && nsec_ad=1
+
         if ((signed)); then
-            # Collected, not reported yet — for the same reason as the
-            # missing signatures above. "No AD" on a zone that was never
-            # signed is not a broken chain of trust, it is the absence of one.
-            if [[ $vflags == *" ad "* ]]; then
+            if (( soa_ad && nsec_ad )); then
                 ((v_ad++))
                 ad_from+="$v "
+            elif (( soa_ad )); then
+                no_nsec_ad+="$v "
             else
                 no_ad+="$v "
             fi
-        elif [[ $(hdr_status "$vout") == SERVFAIL ]]; then
-            # The failure mode unique to an unsigned zone. AD is absent by
-            # definition here, so its absence proves nothing — but SERVFAIL
-            # from a validating resolver, on a zone that should simply be
-            # insecure, usually means a DS record left behind at the parent.
-            # That breaks the zone for every validating resolver on the
-            # Internet while it still answers perfectly from its own
-            # nameservers — which is why only an outside view catches it.
-            servfail_from+="$v "
-        elif [[ $vflags == *" ad "* ]]; then
-            # Config drift, in the expensive direction: the zone is signed and
-            # nobody told the check, so its signature expiry goes unwatched.
+        elif (( soa_ad )); then
+            # Sound now, where it was not before: this is AD on a positive
+            # answer for the apex, which only the zone's own signatures can
+            # produce.
             ad_unexpected+="$v "
         else
             resolved_by+="$v "
@@ -755,10 +799,24 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     # print the same sentence twice with a different IP in it. Same reason the
     # missing-signature diagnosis was collapsed: repetition reads as several
     # problems and buries the ones that are.
-    [[ -n $servfail_from ]] \
-        && note "$zone: SERVFAIL from ${servfail_from% } — an unsigned zone that will not resolve usually means a stale DS at the parent"
+    #
+    # This one is the serious one, and it is new: the zone does not resolve.
+    # Your nameservers can be answering perfectly while the rest of the world
+    # cannot reach the zone at all, which is what a delegation removed or
+    # never completed at the registry looks like from here.
+    [[ -n $unresolved_from ]] \
+        && note "$zone: does not resolve from ${unresolved_from% } — no SOA for the apex. The delegation is missing at the parent, or that resolver cannot see this zone. Your own nameservers may still be serving it perfectly."
+    if [[ -n $servfail_from ]]; then
+        if ((signed)); then
+            note "$zone: SERVFAIL from ${servfail_from% } — a validating resolver refusing a signed zone outright usually means the DNSKEY no longer matches the DS at the parent"
+        else
+            note "$zone: SERVFAIL from ${servfail_from% } — an unsigned zone that will not resolve usually means a stale DS at the parent"
+        fi
+    fi
+    [[ -n $no_nsec_ad ]] \
+        && note "$zone: ${no_nsec_ad% } validates the zone but not its proof of nonexistence — NSEC/NSEC3 is broken or missing, so names that do not exist fail to validate"
     [[ -n $ad_unexpected ]] \
-        && note "$zone: listed as unsigned but ${ad_unexpected% } validates it — it IS signed; change its state column to 'signed' so its signatures get monitored"
+        && note "$zone: listed as unsigned but ${ad_unexpected% } validates its apex — it IS signed; change its state column to 'signed' so its signatures get monitored"
 
     # Now enough is known to say which of the two very different things an
     # absence of signatures means.

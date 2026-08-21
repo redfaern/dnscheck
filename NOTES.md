@@ -101,12 +101,37 @@ line up in a terminal. It also keeps the topology out of `dnscheck.env`, which
 goes on being 0600 root:root and parsed by systemd as root — zone topology is
 public DNS data, `HC_URL` is a credential, and only the credential needs that.
 
+**The outside view asks for the apex SOA before it concludes anything.** This
+is the subtlest thing in the check and it was wrong until it was tested against
+a real internal zone. A validating resolver returns `AD` on an `NXDOMAIN` when
+an *ancestor* proves the name cannot exist — verified live:
+
+```
+dig +dnssec @1.1.1.1 nothing.invalidtld-xyz A
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN
+;; flags: qr rd ra ad
+```
+
+So a random label under a zone whose delegation had been removed at the
+registry came back NXDOMAIN with `AD` — from the parent's signed proof that the
+zone is gone — and the check read that as a validating chain. The nameservers
+would still be serving the zone perfectly, so every authoritative check passed
+too: a green run for a zone unreachable from the entire Internet, which is the
+precise failure an outside view exists to catch.
+
+The apex `SOA` fixes it because it must be answered by the zone, not about it.
+It also makes `AD` sound for the unsigned case: `AD` on a positive answer can
+only come from the zone's own signatures, where `AD` on a denial can come from
+an ancestor — which is why "listed as unsigned but it validates" used to fire
+on zones under a TLD that simply does not exist.
+
 **`validators none` is the honest answer for a zone no outside resolver can
-see.** Without it an internal zone reports healthy forever: a public resolver
-asked about `example.lan` returns NXDOMAIN, the check counts that as an answer,
-and nothing about the zone has actually been verified. Declaring `none` makes
-the gap visible on the summary line every run instead. If there is an internal
-validating resolver, naming it in that column gets the real check back.
+see.** An internal zone on a private TLD gets the root's signed proof that the
+TLD does not exist, and can therefore look both resolvable and correctly signed
+while nothing about it has been verified. Declaring `none` makes the gap
+visible on the summary line every run instead. Naming an internal resolver
+helps only if it actually serves the zone — a forwarder that does not hold it
+passes the query upstream and hands back the root's opinion.
 
 **Signed and unsigned are DECLARED, not detected.** A zone marked `signed` gets
 the full DNSSEC checks; `unsigned` gets reachability, authority and serial

@@ -29,19 +29,29 @@ Per zone, against each nameserver you list:
   DNSKEY signatures are checked
   separately because the KSK resigns on its own schedule and can stall while
   the SOA's signatures still look fresh.
-- **Chain of trust** *(signed zones)* — the zone's validators return the `AD`
-  flag for a *random, never-before-queried* label in it. Random because
-  the apex sits in every resolver's cache, so asking for it can return a
-  validated answer from before the breakage; and a random label also exercises
-  the NSEC/NSEC3 denial-of-existence proof, which is the half of DNSSEC that
-  breaks quietly.
-- **Resolvability** *(unsigned zones)* — the same random label must not draw a
-  `SERVFAIL` from a validating resolver. An unsigned zone cannot produce `AD`,
-  so its absence proves nothing; but SERVFAIL usually means a DS record left
-  behind at the parent, which breaks the zone for every validating resolver on
-  the Internet while it still answers perfectly from its own nameservers. Only
-  an outside view catches that. If `AD` *does* appear, the zone is signed and
-  its row says otherwise — reported, so its expiry does not go unwatched.
+- **Resolvability** *(all zones)* — each validator can produce the zone's apex
+  `SOA`. This has to come first, because it is the only thing proving a
+  resolver reached *your zone* rather than an ancestor's opinion of it: ask any
+  validating resolver for a name under a delegation that no longer exists and
+  it answers `NXDOMAIN` with `AD` set, since the **parent's** proof of
+  nonexistence validates perfectly. Without this step a zone whose delegation
+  had been removed at the registry would report healthy — its own nameservers
+  still serving it, and the one outside check satisfied by the proof that it is
+  gone.
+- **Chain of trust** *(signed zones)* — the validators return `AD` for both
+  that apex answer and a *random, never-before-queried* label. Random because
+  the apex sits in every resolver's cache, so asking only for it can return a
+  validated answer from before the breakage; and a random label exercises the
+  NSEC/NSEC3 denial-of-existence proof, which is the half of DNSSEC that breaks
+  quietly. Both halves must validate.
+- **Stale DS** *(unsigned zones)* — a `SERVFAIL` from a validating resolver
+  usually means a DS record left behind at the parent, which breaks the zone
+  for every validating resolver on the Internet while it still answers
+  perfectly from its own nameservers. Only an outside view catches that. And if
+  `AD` appears on the apex answer, the zone is signed and its row says
+  otherwise — reported, so its expiry does not go unwatched. Apex, not a random
+  label: `AD` on a positive answer can only come from the zone's own
+  signatures, whereas `AD` on a denial can come from an ancestor.
 
 Nothing listens on a port. The only outbound destination is healthchecks.io.
 
@@ -86,11 +96,13 @@ is measured against the floor of BIND's resigning cycle. A zone signed
 somewhere else, under a different policy, needs its own number rather than one
 that alarms every cycle on a healthy zone.
 
-**`validators none` is for a zone no outside resolver can see.** This one
-matters more than it looks. Ask a public resolver about a name under a private
-TLD and it answers `NXDOMAIN` — which the check counts as an answer, so an
-internal zone reports **healthy forever while nothing about it has been
-verified**. Declaring `none` says so out loud instead, on every run:
+**`validators none` is for a zone no outside resolver can see.** Ask a resolver
+about a name under a TLD that does not exist and it gets a signed proof from
+the **root** that it does not — which validates. So an internal zone can look
+both resolvable and correctly signed while nothing about it has been verified.
+Naming an internal resolver helps only if that resolver actually *serves* the
+zone; a forwarder that does not hold it passes the query upstream and returns
+the root's opinion. Declaring `none` says so out loud instead, on every run:
 
 ```
 dmz.example.com: 1/1 NS up [dmz1:2026082011 aa 29d], no outside validation (validators none)
