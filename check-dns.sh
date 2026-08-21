@@ -513,12 +513,47 @@ body=''
 (( ${#problems[@]} )) && body+=$(printf '%s\n' "${problems[@]}")$'\n\n'
 (( ${#summary[@]}  )) && body+=$(printf '%s\n' "${summary[@]}")
 
+# ping_hc <url> <retries> — POST the report body to healthchecks.io.
+#
+# Neither the URL nor the body goes in argv, and each for its own reason.
+#
+# HC_URL is a credential: anyone holding it can forge a check-in and keep the
+# switch quiet while DNS is down. dnscheck.env is 0600 root:root and systemd
+# parses it before dropping to the service user, so nothing unprivileged can
+# read it — and a command line would have handed it to every local account
+# through `ps` anyway, once an hour, for as long as the ping took. The config
+# file's own header says "never in argv"; this is what makes that true.
+#
+# The BODY has a different problem: curl reads a --data-binary argument
+# beginning with `@` as a FILENAME. No line starts with one today — they all
+# start with a zone name — but the day one did, curl would fail to open the
+# file and abort before sending. On the /fail path that converts "DNS is
+# broken" into "the check went silent": the same alert a grace period later,
+# with none of the detail.
+#
+# A --config file closes both. curl reads it from stdin, so neither value is
+# ever in the process table, and `data-binary = "@file"` is an explicit file
+# reference rather than a string that might be mistaken for one. The body goes
+# through a temp file, which PrivateTmp= in the unit keeps private to the run.
+# --retry still holds: curl buffers a --data body in memory rather than
+# streaming it, so every attempt sends identical bytes.
+ping_hc() {
+    local url=$1 retries=$2 tmp rc
+    tmp=$(mktemp) || { echo 'cannot create a temp file for the ping body' >&2; return 1; }
+    printf '%s' "$body" > "$tmp"
+    printf 'url = "%s"\ndata-binary = "@%s"\n' "$url" "$tmp" |
+        curl -fsS --max-time 20 --retry "$retries" --retry-delay 3 \
+             --user-agent "dnscheck/1.0 ($(hostname -s 2>/dev/null || echo unknown))" \
+             -o /dev/null -K -
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
 if (( ${#problems[@]} )); then
     printf '%s\n' "${problems[@]}" >&2
     (( no_ping )) && exit 1
-    curl -fsS --max-time 20 --retry 2 --retry-delay 3 \
-        --user-agent "dnscheck/1.0 ($(hostname -s 2>/dev/null || echo unknown))" \
-        --data-binary "$body" -o /dev/null "${HC_URL%/}/fail" \
+    ping_hc "${HC_URL%/}/fail" 2 \
         || echo 'dead-man ping FAILED — healthchecks.io was not told about the failure' >&2
     exit 1
 fi
@@ -528,8 +563,6 @@ fi
 # Retries on the success path too: a missed ping is not a missed message, it is
 # an ALARM. Crying wolf teaches you to ignore the one signal whose entire
 # meaning is that it stopped.
-curl -fsS --max-time 20 --retry 3 --retry-delay 3 \
-    --user-agent "dnscheck/1.0 ($(hostname -s 2>/dev/null || echo unknown))" \
-    --data-binary "$body" -o /dev/null "$HC_URL" \
+ping_hc "$HC_URL" 3 \
     || { echo 'dead-man ping FAILED — checks passed but healthchecks.io was not told' >&2; exit 1; }
 exit 0

@@ -55,7 +55,9 @@ Nothing listens on a port. The only outbound destination is healthchecks.io.
 `dnscheck.env` holds `HC_URL`, which **is a credential** — anyone with it can
 forge a check-in and keep the dead-man switch quiet while DNS is down. It is
 gitignored, and only the `.example` is ever committed. systemd reads it as root
-before dropping to the service user, so nothing unprivileged needs to read it.
+before dropping to the service user, so nothing unprivileged needs to read it —
+and the ping passes it to `curl` through a config file on stdin rather than on
+a command line, so it never appears in `ps` either.
 
 The check runs under `DynamicUser=yes`: a transient unprivileged account with no
 shell, no home, no password, and nothing left behind.
