@@ -739,7 +739,21 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     v_answered=0 v_ad=0 no_ad='' ad_from='' resolved_by='' ad_unexpected=''
     servfail_from='' unresolved_from='' no_nsec_ad=''
     for v in $zone_val_list; do
-        sout=$(dig +dnssec +time=5 +tries=2 @"$v" "$zone" SOA 2>/dev/null)
+        # +noall +answer, so only the ANSWER section reaches the SOA test
+        # below. A response has an SOA in its AUTHORITY section too, and on an
+        # NXDOMAIN that SOA belongs to the closest enclosing zone — which can
+        # be the parent, or the ROOT. Seen live, asking a forwarder for an
+        # internal zone it does not hold:
+        #
+        #   ;; ->>HEADER<<- status: NXDOMAIN ... flags: qr rd ra ad
+        #   ;; AUTHORITY SECTION:
+        #   .  2395  IN  SOA  a.root-servers.net. ...
+        #
+        # Matching an SOA anywhere in that would have read the root's as proof
+        # the zone resolves. The rcode check catches this particular case, but
+        # leaving a loose record match behind a status test is how the next
+        # case gets through.
+        sout=$(dig +dnssec +time=5 +tries=2 +noall +comments +answer @"$v" "$zone" SOA 2>/dev/null)
         sflags=" $(hdr_flags "$sout") "
         [[ -z $sout || $sflags == '  ' ]] && continue
         ((v_answered++))
@@ -767,7 +781,7 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
         # that must not be cached into one that was. The epoch second makes a
         # collision impossible between runs rather than merely unlikely.
         label="dnscheck-$(date -u +%s)-$RANDOM.$zone"
-        vout=$(dig +dnssec +time=5 +tries=2 @"$v" "$label" A 2>/dev/null)
+        vout=$(dig +dnssec +time=5 +tries=2 +noall +comments +answer @"$v" "$label" A 2>/dev/null)
         vflags=" $(hdr_flags "$vout") "
         nsec_ad=0
         [[ $vflags == *" ad "* ]] && nsec_ad=1
