@@ -109,21 +109,21 @@ zerr() { # zerr <zones-file-body> -> the parse errors, one per line
 }
 
 is 'defaults fill every "-"' \
-   "$(zt 'a.com signed - - -')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+   "$(zt 'a.com signed - - -')" 'a.com signed 3 ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
 is 'a zone overrides the default nameservers' \
-   "$(zt 'a.com signed - x=10.0.0.1,y=10.0.0.2 -')" 'a.com signed 3 x=10.0.0.1 y=10.0.0.2 1.1.1.1 8.8.8.8'
+   "$(zt 'a.com signed - x=10.0.0.1,y=10.0.0.2 -')" 'a.com signed 3 x=10.0.0.1,y=10.0.0.2 1.1.1.1,8.8.8.8'
 is 'a zone overrides the default threshold' \
-   "$(zt 'a.com signed 9 - -')" 'a.com signed 9 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+   "$(zt 'a.com signed 9 - -')" 'a.com signed 9 ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
 is 'validators none survives to the resolved table' \
-   "$(zt 'a.com signed - - none')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 none'
+   "$(zt 'a.com signed - - none')" 'a.com signed 3 ns1=192.0.2.1,ns2=192.0.2.2 none'
 is 'an unsigned zone carries no threshold' \
-   "$(zt 'a.com unsigned - - -')" 'a.com unsigned - ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+   "$(zt 'a.com unsigned - - -')" 'a.com unsigned - ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
 is 'comments and blank lines are skipped' \
    "$(zt '# a comment
 
-a.com signed - - -   # trailing comment')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+a.com signed - - -   # trailing comment')" 'a.com signed 3 ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
 is 'a commented-out zone is not checked' "$(zt '#a.com signed - - -
-b.com signed - - -')" 'b.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+b.com signed - - -')" 'b.com signed 3 ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
 
 # A bad row must be REPORTED, never silently dropped: a skipped row is a zone
 # that stopped being watched while the check went on reporting success.
@@ -167,6 +167,27 @@ printf 'a.com signed - - -\n' > "$TD/zones"
 is 'commas in dnscheck.env resolve as spaces do' \
    "$(DNSCHECK_CONF="$TD/env-commas" DNSCHECK_ZONES="$TD/zones" bash "$SCRIPT" --show-config 2>&1 |
       sed -n '/^ZONE  */,$p' | tail -n +2 | sed 's/  */ /g;s/ $//')" \
-   'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+   'a.com signed 3 ns1=192.0.2.1,ns2=192.0.2.2 1.1.1.1,8.8.8.8'
+
+# --show-config renders lists with commas whatever the config used. Two things
+# depend on it: the output is what gets pasted back into either file, and a
+# list wider than its column runs into the next one — with spaces inside the
+# value, every gap in that row then looks the same and there is no telling
+# where the nameservers end and the validators begin.
+cat > "$TD/env-messy" <<'CONF'
+NS=ns1=192.0.2.1   ns2=192.0.2.2,,ns3=192.0.2.3
+VALIDATORS=1.1.1.1 8.8.8.8
+WARN_DAYS=3
+HC_URL=https://hc-ping.com/x
+CONF
+printf 'a.com signed - - -\n' > "$TD/zones"
+sc() { DNSCHECK_CONF="$TD/env-messy" DNSCHECK_ZONES="$TD/zones" bash "$SCRIPT" --show-config 2>&1; }
+is 'the settings table renders a list with commas' \
+   "$(sc | sed -n 's/^NS  *config  *\([^ ]*\).*/\1/p')" \
+   'ns1=192.0.2.1,ns2=192.0.2.2,ns3=192.0.2.3'
+is 'and still counts the entries' "$(sc | sed -n 's/.*(\([0-9]*\))$/\1/p' | head -1)" '3'
+is 'the zone row separates its two lists by exactly one space' \
+   "$(sc | sed -n '/^a\.com/p' | sed 's/^.*  *[0-9][0-9]*  *//')" \
+   'ns1=192.0.2.1,ns2=192.0.2.2,ns3=192.0.2.3 1.1.1.1,8.8.8.8'
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 (( fail == 0 ))

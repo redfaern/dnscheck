@@ -155,6 +155,29 @@ VALIDATORS=${VALIDATORS//,/ }
 # grep can answer — it cannot show a quote that was stripped, a default that
 # filled a gap, an environment variable that won, or which of two duplicate
 # lines was taken.
+# Lists are DISPLAYED comma-separated, whatever they are stored as. Two
+# reasons, and the second is the one that matters.
+#
+# Pasting: this output is what gets copied into dnscheck.env or into a zone
+# table row, and only commas work in both places.
+#
+# Reading: a value wider than its column pushes into the next one, and with
+# spaces inside the value every gap then looks alike —
+#
+#   smeagol=202.171.189.135 deagol=202.144.167.254 maggot=115.70.69.197 1.1.1.1 8.8.8.8
+#
+# is five things with no way to see where the nameservers stop and the
+# validators start. Commas inside leave exactly one space in that line, and it
+# is the column boundary.
+#
+# Rebuilt by word splitting rather than substituted, so a run of spaces in the
+# config collapses instead of becoming ",,".
+fmt_list() {
+    local out='' w
+    for w in ${1-}; do out+="$w,"; done
+    printf '%s' "${out%,}"
+}
+
 show_config() {
     local v val src n i
     printf '%-15s %s\n' 'config file' "$CONF_FILE"
@@ -178,7 +201,8 @@ show_config() {
         n=''
         case $v in
             NS|VALIDATORS)
-                [[ -n $val ]] && n="  ($(wc -w <<<"$val"))" ;;
+                [[ -n $val ]] && n="  ($(wc -w <<<"$val"))"
+                val=$(fmt_list "$val") ;;
         esac
         printf '%-15s %-12s %s%s\n' "$v" "$src" "${val:-—}" "$n"
     done
@@ -192,7 +216,7 @@ show_config() {
         for (( i=0; i<Z_COUNT; i++ )); do
             (( Z_SIGNED[i] )) && src=signed || src=unsigned
             printf '%-24s %-9s %-5s %-32s %s\n' \
-                "${Z_NAME[i]}" "$src" "${Z_WARN[i]:--}" "${Z_NS[i]}" "${Z_VAL[i]}"
+                "${Z_NAME[i]}" "$src" "${Z_WARN[i]:--}"                 "$(fmt_list "${Z_NS[i]}")" "$(fmt_list "${Z_VAL[i]}")"
         done
     fi
     if (( ${#ZONE_ERR[@]} )); then
