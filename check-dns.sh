@@ -179,7 +179,7 @@ fmt_list() {
 }
 
 show_config() {
-    local v val src n i
+    local v val src n i st nsf warnf wz ws ww wn
     printf '%-15s %s\n' 'config file' "$CONF_FILE"
     if [[ -r $CONF_FILE ]]; then
         printf '%-15s %s\n' '' 'readable'
@@ -212,11 +212,33 @@ show_config() {
     # checked against" is the question, and the file cannot answer it.
     printf '\n%-15s %s\n' 'zones file' "$ZONES_FILE"
     if (( Z_COUNT )); then
-        printf '\n%-24s %-9s %-5s %-32s %s\n' 'ZONE' 'STATE' 'WARN' 'NAMESERVERS' 'VALIDATORS'
+        # Widths from the content, not from guesses. Fixed widths were wrong in
+        # both directions: a nameserver list is routinely wider than any column
+        # anyone would pick, so it pushed into the next one and left the
+        # VALIDATORS heading sitting over the middle of the nameservers; and a
+        # short zone list padded out to nothing. A heading that does not sit
+        # above its column is worse than no heading, because it is read as one.
+        #
+        # The header string is the floor, so a narrow table still reads.
+        wz=4 ws=5 ww=4 wn=11
         for (( i=0; i<Z_COUNT; i++ )); do
-            (( Z_SIGNED[i] )) && src=signed || src=unsigned
-            printf '%-24s %-9s %-5s %-32s %s\n' \
-                "${Z_NAME[i]}" "$src" "${Z_WARN[i]:--}"                 "$(fmt_list "${Z_NS[i]}")" "$(fmt_list "${Z_VAL[i]}")"
+            (( Z_SIGNED[i] )) && st=signed || st=unsigned
+            nsf=$(fmt_list "${Z_NS[i]}")
+            warnf=${Z_WARN[i]:--}
+            (( ${#Z_NAME[i]} > wz )) && wz=${#Z_NAME[i]}
+            (( ${#st}        > ws )) && ws=${#st}
+            (( ${#warnf}     > ww )) && ww=${#warnf}
+            (( ${#nsf}       > wn )) && wn=${#nsf}
+        done
+        # Two spaces between columns, so the gap inside a comma-free value can
+        # never be mistaken for the gap between two of them.
+        printf '\n%-*s  %-*s  %-*s  %-*s  %s\n' \
+            "$wz" 'ZONE' "$ws" 'STATE' "$ww" 'WARN' "$wn" 'NAMESERVERS' 'VALIDATORS'
+        for (( i=0; i<Z_COUNT; i++ )); do
+            (( Z_SIGNED[i] )) && st=signed || st=unsigned
+            printf '%-*s  %-*s  %-*s  %-*s  %s\n' \
+                "$wz" "${Z_NAME[i]}" "$ws" "$st" "$ww" "${Z_WARN[i]:--}" \
+                "$wn" "$(fmt_list "${Z_NS[i]}")" "$(fmt_list "${Z_VAL[i]}")"
         done
     fi
     if (( ${#ZONE_ERR[@]} )); then

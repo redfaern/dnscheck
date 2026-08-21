@@ -186,8 +186,33 @@ is 'the settings table renders a list with commas' \
    "$(sc | sed -n 's/^NS  *config  *\([^ ]*\).*/\1/p')" \
    'ns1=192.0.2.1,ns2=192.0.2.2,ns3=192.0.2.3'
 is 'and still counts the entries' "$(sc | sed -n 's/.*(\([0-9]*\))$/\1/p' | head -1)" '3'
-is 'the zone row separates its two lists by exactly one space' \
-   "$(sc | sed -n '/^a\.com/p' | sed 's/^.*  *[0-9][0-9]*  *//')" \
+is 'the zone row shows both lists comma separated' \
+   "$(sc | sed -n '/^a\.com/p' | sed 's/^.*  *[0-9][0-9]*  *//; s/  */ /g; s/ $//')" \
    'ns1=192.0.2.1,ns2=192.0.2.2,ns3=192.0.2.3 1.1.1.1,8.8.8.8'
+
+# Column headings must sit above their column. Fixed widths meant a nameserver
+# list — routinely wider than any width anyone would pick — pushed into the
+# next column and left VALIDATORS floating over the middle of the nameservers.
+# A heading that is not above its column is worse than none, because it is
+# read as one.
+#
+# Both assertions are made on the WIDEST row, where the column padding is zero
+# and what is left between two values is the column separator itself. On any
+# narrower row the padding would swamp it and the test would pass regardless.
+cat > "$TD/zones-wide" <<'ZONES'
+a.io signed - x=192.0.2.9 -
+some-quite-long-department.example.com.au signed - - -
+ZONES
+wide() { DNSCHECK_CONF="$TD/env" DNSCHECK_ZONES="$TD/zones-wide" bash "$SCRIPT" --show-config 2>&1; }
+
+is 'the headings sit above their columns' \
+   "$(wide | awk '
+       /^ZONE  +STATE/ { hn=index($0,"NAMESERVERS"); hv=index($0,"VALIDATORS"); next }
+       /^some-quite-long-department/ {
+           print (index($0,"ns1=192.0.2.1")==hn && index($0,"1.1.1.1")==hv) ? "yes" : "no" }')" \
+   'yes'
+
+gap=$(wide | sed -n '/^some-quite-long-department/s/.*ns2=192\.0\.2\.2\( *\)1\.1\.1\.1.*/\1/p')
+is 'two spaces between columns, on the row with no padding' "${#gap}" '2'
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 (( fail == 0 ))
