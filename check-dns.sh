@@ -316,6 +316,7 @@ check_ns() {
     NS_SERIAL=''
     NS_RRSIG_DAYS=''
     NS_UNSIGNED=0
+    NS_AA=0
 
     out=$(auth_query "$zone" "$ip" SOA)
     if [[ -z $out ]]; then
@@ -332,9 +333,18 @@ check_ns() {
     # Without AA the box answered, but not as an authority for this zone — a
     # dropped zone, a failed reload, a config that no longer includes it.
     # "It replied" is not the same as "it is still serving your zone".
+    #
+    # Recorded as well as reported. On a FAILING run the note above says so;
+    # on a healthy run the summary line prints "aa" against this server, so
+    # the strongest per-server claim the check makes leaves a trace either
+    # way. A check whose success is silent cannot be distinguished, in a
+    # journal, from a check that did not run.
     flags=" $(hdr_flags "$out") "
-    [[ $flags == *" aa "* ]] \
-        || note "$zone @$name: answered without the AA flag — no longer authoritative for this zone"
+    if [[ $flags == *" aa "* ]]; then
+        NS_AA=1
+    else
+        note "$zone @$name: answered without the AA flag — no longer authoritative for this zone"
+    fi
 
     NS_SERIAL=$(awk '$4=="SOA"{print $7; exit}' <<<"$out")
     [[ -n $NS_SERIAL ]] || note "$zone @$name: NOERROR but no SOA record in the answer"
@@ -399,7 +409,7 @@ unset _z
 for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     signed=${_entry%% *}
     zone=${_entry#* }
-    answered=0 serials='' min_days='' unsigned_ns=''
+    answered=0 serials='' details='' min_days='' unsigned_ns=''
 
     for pair in $NS; do
         name=${pair%%=*}; ip=${pair#*=}
@@ -407,12 +417,21 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
             ((answered++))
             [[ -n $NS_SERIAL ]] && serials+="$name:$NS_SERIAL "
             ((NS_UNSIGNED)) && unsigned_ns+="$name "
+            # One field per server for the summary line: what it said its
+            # serial was, whether it claimed authority, and how much life its
+            # signatures have. Assembled here rather than in check_ns because
+            # only the caller knows this server answered at all.
+            detail="$name:${NS_SERIAL:-noserial}"
+            ((NS_AA)) && detail+=" aa"
             if [[ -n $NS_RRSIG_DAYS ]]; then
+                detail+=" ${NS_RRSIG_DAYS}d"
                 [[ -z $min_days ]] && min_days=$NS_RRSIG_DAYS
                 (( NS_RRSIG_DAYS < min_days )) && min_days=$NS_RRSIG_DAYS
             fi
+            details+="$detail, "
         fi
     done
+    details=${details%, }
 
     (( answered < ns_total )) \
         && note "$zone: only $answered of $ns_total nameservers answered"
@@ -432,7 +451,11 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
         done
         again=$(tr ' ' '\n' <<<"$recheck" | sed 's/.*://' | sort -u | grep -c .)
         if (( again > 1 )); then
-            note "$zone: serials still disagree after 20s — $recheck (was: $serials)"
+            # Both lists trimmed. They accumulate a trailing space exactly as
+            # the summary's did, and this is the line you would be reading at
+            # 3am — "ns3:2026080399  (was:" is not what you want to be
+            # deciphering then.
+            note "$zone: serials still disagree after 20s — ${recheck% } (was: ${serials% })"
         else
             info "$zone: serials converged during the run (transfer was in progress)"
         fi
@@ -444,7 +467,7 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # been queried forces a full resolution now, and exercises the NSEC/NSEC3
     # denial-of-existence proof — the half of DNSSEC that breaks quietly.
     # The rcode does not matter here; the AD flag does.
-    v_answered=0 v_ad=0 no_ad=''
+    v_answered=0 v_ad=0 no_ad='' ad_from='' resolved_by='' ad_unexpected='' servfail_from=''
     for v in $VALIDATORS; do
         # Timestamp AND randomness. $RANDOM alone is 0-32767 and its
         # concatenation is not uniform, so a label CAN repeat — and a repeat
@@ -463,6 +486,7 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
             # signed is not a broken chain of trust, it is the absence of one.
             if [[ $vflags == *" ad "* ]]; then
                 ((v_ad++))
+                ad_from+="$v "
             else
                 no_ad+="$v "
             fi
@@ -474,15 +498,28 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
             # That breaks the zone for every validating resolver on the
             # Internet while it still answers perfectly from its own
             # nameservers — which is why only an outside view catches it.
-            note "$zone: SERVFAIL from $v — an unsigned zone that will not resolve usually means a stale DS at the parent"
+            servfail_from+="$v "
         elif [[ $vflags == *" ad "* ]]; then
             # Config drift, in the expensive direction: the zone is signed and
             # nobody told the check, so its signature expiry goes unwatched.
-            note "$zone: listed as unsigned but $v validates it — it IS signed; move it to SIGNED_ZONES so its signatures get monitored"
+            ad_unexpected+="$v "
+        else
+            resolved_by+="$v "
         fi
     done
     (( v_answered == 0 )) \
         && note "$zone: no validator reachable ($VALIDATORS) — chain of trust unconfirmed"
+
+    # Named together, reported once. A stale DS breaks a zone for EVERY
+    # validating resolver, and a zone in the wrong list is one fact about the
+    # config, not one per resolver that noticed — so both of these used to
+    # print the same sentence twice with a different IP in it. Same reason the
+    # missing-signature diagnosis was collapsed: repetition reads as several
+    # problems and buries the ones that are.
+    [[ -n $servfail_from ]] \
+        && note "$zone: SERVFAIL from ${servfail_from% } — an unsigned zone that will not resolve usually means a stale DS at the parent"
+    [[ -n $ad_unexpected ]] \
+        && note "$zone: listed as unsigned but ${ad_unexpected% } validates it — it IS signed; move it to SIGNED_ZONES so its signatures get monitored"
 
     # Now enough is known to say which of the two very different things an
     # absence of signatures means.
@@ -511,10 +548,19 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # Trimmed: serials accumulates a trailing space, which showed up in every
     # summary line as "ns3:2026080414 ,".
     serials_shown=${serials% }
+    ad_from=${ad_from% }; resolved_by=${resolved_by% }
+
+    # Per SERVER, not per zone. The old line reported one serial list, the
+    # MINIMUM RRSIG life across all nameservers, and a count of validators —
+    # so a healthy run proved that some server was authoritative and some
+    # signature had 29 days left, without saying which. Every claim now names
+    # the server or resolver it came from, which is what makes the line
+    # evidence rather than an assertion. It stays ONE line per zone: nine
+    # lines a run would bury the problem lines they sit among.
     if ((signed)); then
-        info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, RRSIG ${min_days:-?}d left, $v_answered/$v_total validators AD"
+        info "$zone: $answered/$ns_total NS up [${details% }], AD from ${ad_from:-none}"
     else
-        info "$zone: $answered/$ns_total NS up, serial ${serials_shown:-none}, unsigned, resolves at $v_answered/$v_total validators"
+        info "$zone: $answered/$ns_total NS up [${details% }], unsigned, resolved by ${resolved_by:-none}"
     fi
 done
 
@@ -563,6 +609,13 @@ ping_hc() {
 
 if (( ${#problems[@]} )); then
     printf '%s\n' "${problems[@]}" >&2
+    # The per-zone summary goes to the journal on THIS path too, not only on
+    # the healthy one. It was already in the ping body, so healthchecks.io saw
+    # it, but the journal did not — which left the one run you actually go and
+    # read showing what broke and nothing about what did not. "ns3 did not
+    # answer" is a different problem from "ns3 did not answer and the other
+    # two disagree about the serial", and the difference is in these lines.
+    (( ${#summary[@]} )) && printf '%s\n' "${summary[@]}"
     (( no_ping )) && exit 1
     ping_hc "${HC_URL%/}/fail" 2 \
         || echo 'dead-man ping FAILED — healthchecks.io was not told about the failure' >&2
