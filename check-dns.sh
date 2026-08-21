@@ -225,6 +225,24 @@ fi
 # exercised before there is a healthchecks.io check to point at.
 ((no_ping)) || [[ -n ${HC_URL:-} ]] || cfg_missing HC_URL
 
+# WARN_DAYS is the only setting that reaches an arithmetic context, and bash
+# fails two different ways there, both quiet.
+#
+#   WARN_DAYS=three    `three` is read as a VARIABLE, is unset, and set -u
+#                      kills the run mid-check — before any report or ping.
+#   WARN_DAYS=3 days   every realistic typo: a stray trailing comment, a unit,
+#                      a decimal point. (( )) prints an arithmetic error and
+#                      returns non-zero, and with no set -e the run carries on
+#                      treating the comparison as FALSE. Signature expiry is
+#                      no longer watched, and the run pings SUCCESS.
+#
+# The second is the dangerous one, and it is the same failure as the bare ZONES
+# key refused above: parses fine, runs fine, checks nothing. So validate rather
+# than trust — and normalise to base 10, because a leading zero in an
+# arithmetic context is OCTAL and 010 would silently mean 8.
+[[ ${WARN_DAYS:-} =~ ^[0-9]+$ ]] || cfg_missing 'a numeric WARN_DAYS (whole days, digits only)'
+WARN_DAYS=$((10#$WARN_DAYS))
+
 problems=()
 summary=()
 note() { problems+=("$1"); }
