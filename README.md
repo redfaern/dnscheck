@@ -43,6 +43,64 @@ Per zone, against each nameserver you list:
 
 Nothing listens on a port. The only outbound destination is healthchecks.io.
 
+## Install
+
+On a fresh Debian, Raspberry Pi OS or Ubuntu host. **Create the
+healthchecks.io check first** — period **1 hour**, grace **15 min**, on a uuid
+of its own — and have its ping URL to hand; step 4 needs it.
+
+```sh
+# 1. dependencies
+sudo apt update
+sudo apt install -y bind9-dnsutils curl
+
+# 2. fetch and unpack — no git, no account, no SSH key
+cd ~
+curl -fsSL https://github.com/redfaern/dnscheck/archive/refs/heads/main.tar.gz | tar xz
+cd dnscheck-main
+
+# 3. see what would happen, then place the files
+./deploy.sh --dry-run
+sudo ./deploy.sh
+
+# 4. put your nameservers, zones and ping URL in
+sudo nano /etc/dnscheck/dnscheck.env
+
+# 5. confirm the run will use what you think it will
+sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+```
+
+Then the four steps `deploy.sh` prints when it finishes — checks, sandbox,
+alert path, arm:
+
+```sh
+sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping        # 1. the checks
+sudo systemctl start dnscheck.service                      # 2. the sandbox
+sudo journalctl -u dnscheck -n 30 --no-pager
+sudo SIGNED_ZONES=dnssec-failed.org \
+     /usr/local/lib/dnscheck/check-dns.sh                  # 3. the ALERT path
+sudo systemctl enable --now dnscheck.timer                 # 4. arm it
+```
+
+Step 3 is the one people skip, and it is the only one that proves the alert
+reaches you. `dnssec-failed.org` is maintained as a permanently broken zone for
+exactly this. It pings for real, so the check goes down and then recovers on
+the next run.
+
+To update later, repeat steps 2 and 3. `deploy.sh` is idempotent, reports what
+it changed, and never touches an existing `dnscheck.env`.
+
+### Other distributions
+
+Anything with systemd 247+ (Debian 12, Ubuntu 22.04, Fedora 36, and later) and
+GNU coreutils. Only the package manager differs — `dig` comes from
+`bind9-dnsutils` on Debian and Ubuntu, `bind-utils` on Fedora, RHEL and
+openSUSE, and `bind` on Arch. `deploy.sh` checks for `dig`, `curl` and the
+systemd version, and names what is missing.
+
+Not supported: macOS and the BSDs, which lack GNU `date -d` and `stat -c`; and
+any host without systemd.
+
 ## Layout
 
 | File | Goes to | Mode |
