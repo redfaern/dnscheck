@@ -276,24 +276,50 @@ hdr_flags()  { sed -n 's/^;; flags: \([^;]*\);.*/\1/p'  <<<"$1" | head -1; }
 # Check the RRSIG covering one RRset for presence and remaining life.
 # Sets RRSIG_DAYS on success.
 check_rrsig() {
-    local out=$1 zone=$2 name=$3 type=$4 rrsig exp ee days
-    rrsig=$(awk -v t="$type" '$4=="RRSIG" && $5==t {print; exit}' <<<"$out")
-    if [[ -z $rrsig ]]; then
+    local out=$1 zone=$2 name=$3 type=$4 exps exp ee best='' best_exp=''
+
+    # ALL the expiries, not the first one seen. An RRset can legitimately
+    # carry more than one RRSIG — the DNSKEY RRset does exactly that through a
+    # double-KSK rollover, which is BIND's default method. A resolver
+    # validates if ANY signature is good, so the honest figure is the LATEST
+    # expiry. Taking whichever awk reached first could report the outgoing
+    # key's signature on a perfectly healthy zone, during a rollover, which is
+    # when a spurious page is least welcome.
+    exps=$(awk -v t="$type" '$4=="RRSIG" && $5==t {print $9}' <<<"$out")
+    if [[ -z $exps ]]; then
         note "$zone @$name: $type present but not signed — signing stopped, or the zone reloaded unsigned"
         return 1
     fi
-    exp=$(awk '{print $9}' <<<"$rrsig")
-    if ! ee=$(epoch "$exp"); then
-        note "$zone @$name: cannot parse $type RRSIG expiry ($exp)"
+    while read -r exp; do
+        [[ -n $exp ]] || continue
+        ee=$(epoch "$exp") || continue
+        if [[ -z $best ]] || (( ee > best )); then best=$ee; best_exp=$exp; fi
+    done <<<"$exps"
+    if [[ -z $best ]]; then
+        note "$zone @$name: cannot parse $type RRSIG expiry ($(tr '\n' ' ' <<<"$exps" | sed 's/ *$//'))"
         return 1
     fi
-    days=$(( (ee - now) / 86400 ))
-    if (( days < 0 )); then
-        note "$zone @$name: $type RRSIG EXPIRED ${days#-}d ago ($exp) — resolvers are already failing"
-    elif (( days < WARN_DAYS )); then
-        note "$zone @$name: $type RRSIG expires in ${days}d ($exp)"
+
+    # Compare EPOCHS, not a day count. Integer division truncates toward zero,
+    # so (ee - now) / 86400 is 0 for anything within ±24h: a signature that
+    # expired eleven hours ago and one with eleven hours left are the same
+    # number. `days < 0` therefore misses the entire first day of a real
+    # outage — the day you would act in — and calls it "expires in 0d". And
+    # `days <= 0` would fix that by declaring a healthy zone EXPIRED instead.
+    # Neither threshold can work, because the distinction is destroyed before
+    # the comparison.
+    if (( best < now )); then
+        # Hours, not days: this branch's most likely reading is now a sub-day
+        # one, and "EXPIRED 0d ago" reads like a rounding artefact rather than
+        # an emergency.
+        note "$zone @$name: $type RRSIG EXPIRED $(( (now - best + 3599) / 3600 ))h ago ($best_exp) — resolvers are already failing"
+    elif (( (best - now) / 86400 < WARN_DAYS )); then
+        note "$zone @$name: $type RRSIG expires in $(( (best - now) / 86400 ))d ($best_exp)"
     fi
-    RRSIG_DAYS=$days
+
+    # The coarse day count is fine here: it only feeds min_days and the summary
+    # line, where a negative number still reads correctly.
+    RRSIG_DAYS=$(( (best - now) / 86400 ))
     return 0
 }
 
