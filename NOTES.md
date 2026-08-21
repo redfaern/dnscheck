@@ -231,8 +231,8 @@ thing here ever pings: a second emitter on the same uuid keeps the switch quiet
 for a monitor that has stopped.
 
 **systemd, not cron.** A timer gives overlap protection (a second start while
-one is running is queued, not run concurrently), `RuntimeMaxSec` for a hung
-`dig`, jitter so it does not fire on the hour with every other job on the
+one is running is queued, not run concurrently), `TimeoutStartSec=` for a
+hung `dig`, jitter so it does not fire on the hour with every other job on the
 Internet, `Persistent=true` to re-arm the switch after a reboot, the sandbox,
 and — via `DynamicUser=yes` — the dedicated unprivileged account without an
 account to create, remember, or forget to lock.

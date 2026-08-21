@@ -141,21 +141,15 @@ unset _v _val
 # lines was taken.
 show_config() {
     local v val src n
-    printf '%-15s %s
-' 'config file' "$CONF_FILE"
+    printf '%-15s %s\n' 'config file' "$CONF_FILE"
     if [[ -r $CONF_FILE ]]; then
-        printf '%-15s %s
-' '' 'readable'
+        printf '%-15s %s\n' '' 'readable'
     elif [[ -e $CONF_FILE ]]; then
-        printf '%-15s %s
-' '' "NOT READABLE by $(id -un) — values below are environment and defaults only"
+        printf '%-15s %s\n' '' "NOT READABLE by $(id -un) — values below are environment and defaults only"
     else
-        printf '%-15s %s
-' '' 'does not exist'
+        printf '%-15s %s\n' '' 'does not exist'
     fi
-    printf '
-%-15s %-12s %s
-' 'SETTING' 'FROM' 'VALUE'
+    printf '\n%-15s %-12s %s\n' 'SETTING' 'FROM' 'VALUE'
     for v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
         val=${!v:-}
         src=${_src[$v]:-unset}
@@ -170,8 +164,7 @@ show_config() {
             NS|SIGNED_ZONES|UNSIGNED_ZONES|VALIDATORS)
                 [[ -n $val ]] && n="  ($(wc -w <<<"$val"))" ;;
         esac
-        printf '%-15s %-12s %s%s
-' "$v" "$src" "${val:-—}" "$n"
+        printf '%-15s %-12s %s%s\n' "$v" "$src" "${val:-—}" "$n"
     done
 }
 
@@ -203,20 +196,12 @@ cfg_missing() {
 # and the check would go green having quietly stopped watching every zone in
 # it. Refusing is loud and takes one edit to clear.
 if [[ -z ${SIGNED_ZONES:-} && -z ${UNSIGNED_ZONES:-} ]]    && grep -qE '^[[:space:]]*ZONES[[:space:]]*=' "$CONF_FILE" 2>/dev/null; then
-    printf 'ZONES has been split in two, in %s:
-
-' "$CONF_FILE" >&2
-    printf '  SIGNED_ZONES=    zones served with DNSSEC — signatures and chain of trust checked
-' >&2
-    printf '  UNSIGNED_ZONES=  zones served without it — reachability and serial agreement only
-' >&2
-    printf '
-A zone in the wrong list is not cosmetic: an unsigned zone listed as signed
-' >&2
-    printf 'alarms constantly for RRSIGs that were never meant to exist, and a signed one
-' >&2
-    printf 'listed as unsigned has its signature expiry go unwatched.
-' >&2
+    printf 'ZONES has been split in two, in %s:\n\n' "$CONF_FILE" >&2
+    printf '  SIGNED_ZONES=    zones served with DNSSEC — signatures and chain of trust checked\n' >&2
+    printf '  UNSIGNED_ZONES=  zones served without it — reachability and serial agreement only\n' >&2
+    printf '\nA zone in the wrong list is not cosmetic: an unsigned zone listed as signed\n' >&2
+    printf 'alarms constantly for RRSIGs that were never meant to exist, and a signed one\n' >&2
+    printf 'listed as unsigned has its signature expiry go unwatched.\n' >&2
     exit 3
 fi
 
