@@ -164,7 +164,7 @@ VALIDATORS=${VALIDATORS//,/ }
 # Reading: a value wider than its column pushes into the next one, and with
 # spaces inside the value every gap then looks alike —
 #
-#   smeagol=202.171.189.135 deagol=202.144.167.254 maggot=115.70.69.197 1.1.1.1 8.8.8.8
+#   ns1=192.0.2.1 ns2=198.51.100.1 ns3=203.0.113.1 1.1.1.1 8.8.8.8
 #
 # is five things with no way to see where the nameservers stop and the
 # validators start. Commas inside leave exactly one space in that line, and it

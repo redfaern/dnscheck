@@ -24,12 +24,13 @@ Per zone, against each nameserver you list:
   not.
   A mismatch is re-checked after 20s before it is reported, because disagreeing
   for a few seconds after a NOTIFY is normal, healthy behaviour.
-- **Signing** *(signed zones)* — an `RRSIG` exists over both the SOA and the DNSKEY RRset, and
-  neither expires within `WARN_DAYS`. The DNSKEY signatures are checked
+- **Signing** *(signed zones)* — an `RRSIG` exists over both the SOA and the
+  DNSKEY RRset, and neither expires within that zone's `warn` threshold. The
+  DNSKEY signatures are checked
   separately because the KSK resigns on its own schedule and can stall while
   the SOA's signatures still look fresh.
-- **Chain of trust** *(signed zones)* — two public validators return the `AD`
-  flag for a *random, never-before-queried* label in the zone. Random because
+- **Chain of trust** *(signed zones)* — the zone's validators return the `AD`
+  flag for a *random, never-before-queried* label in it. Random because
   the apex sits in every resolver's cache, so asking for it can return a
   validated answer from before the breakage; and a random label also exercises
   the NSEC/NSEC3 denial-of-existence proof, which is the half of DNSSEC that
@@ -40,9 +41,84 @@ Per zone, against each nameserver you list:
   behind at the parent, which breaks the zone for every validating resolver on
   the Internet while it still answers perfectly from its own nameservers. Only
   an outside view catches that. If `AD` *does* appear, the zone is signed and
-  in the wrong list — reported, so its signature expiry does not go unwatched.
+  its row says otherwise — reported, so its expiry does not go unwatched.
 
 Nothing listens on a port. The only outbound destination is healthchecks.io.
+
+## Zones
+
+Each zone gets a row in `/etc/dnscheck/zones`, five whitespace-separated
+columns:
+
+```
+# zone                state     warn  nameservers                    validators
+example.com           signed    -     -                              -
+example.net           signed    -     -                              -
+example.org           unsigned  -     -                              -
+legacy.example.com    signed    8     old1=192.0.2.7,old2=192.0.2.8  -
+internal.example      signed    -     lan1=10.0.0.53,lan2=10.0.0.54  10.0.0.53
+dmz.example.com       signed    -     dmz1=10.0.1.53                 none
+```
+
+| column | meaning |
+|---|---|
+| `zone` | the zone apex |
+| `state` | `signed` or `unsigned` — **declared, not detected** |
+| `warn` | alarm when a signature has fewer than this many days left |
+| `nameservers` | `label=ip` pairs; the label names the server in every alert |
+| `validators` | recursive resolvers that confirm the chain from outside |
+
+`-` in any column takes the default from `dnscheck.env`, so an ordinary zone
+stays one short row. Lists inside a column are separated by **commas**, because
+a space there would start a new column; `dnscheck.env` accepts either, so a
+list can be pasted between the two files unedited.
+
+### What the per-zone columns are for
+
+**Zones do not all live on the same nameservers.** A single global list can only
+express "every zone is on every server", which cannot describe a split horizon,
+a zone still parked on a previous provider, or an internal zone on internal
+resolvers. Each row names its own, and the summary line reports whichever
+servers that zone was actually checked against.
+
+**A threshold tracks the signing policy, not the host.** The default of 3 days
+is measured against the floor of BIND's resigning cycle. A zone signed
+somewhere else, under a different policy, needs its own number rather than one
+that alarms every cycle on a healthy zone.
+
+**`validators none` is for a zone no outside resolver can see.** This one
+matters more than it looks. Ask a public resolver about a name under a private
+TLD and it answers `NXDOMAIN` — which the check counts as an answer, so an
+internal zone reports **healthy forever while nothing about it has been
+verified**. Declaring `none` says so out loud instead, on every run:
+
+```
+dmz.example.com: 1/1 NS up [dmz1:2026082011 aa 29d], no outside validation (validators none)
+```
+
+If you have an internal validating resolver, naming it in that column gets the
+real check back.
+
+### Turning DNSSEC on
+
+Leave the zone `unsigned` until the parent publishes your `DS` record. Between
+signing a zone and the registry adding the `DS`, every nameserver serves
+signatures and no resolver validates them: the zone is *insecure, not broken*,
+and resolves fine for everyone. Marked `signed` it alarms for however long that
+takes; marked `unsigned` it keeps its reachability and agreement checks
+throughout, and the moment the `DS` appears the check tells you the zone now
+validates and should be moved. Flipping the column is the deliberate act that
+starts watching its signatures.
+
+If you do leave it `signed` through the changeover, the failure names the cause
+rather than a symptom — the nameservers are fine, and being sent to look at
+them is a wasted evening:
+
+```
+example.org: every nameserver serves signatures but no validator sees AD
+(1.1.1.1 8.8.8.8) — the parent's DS record is missing or does not match, so the
+zone is insecure rather than broken.
+```
 
 ## Install
 
