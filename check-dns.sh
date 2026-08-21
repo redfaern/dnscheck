@@ -33,12 +33,18 @@ check-dns.sh — authoritative DNS + DNSSEC health check
   --help      this text
 
 Configuration (environment; normally /etc/dnscheck/dnscheck.env):
-  NS          "label=ip" pairs, space separated
-  SIGNED_ZONES    zones served WITH DNSSEC — full checks
-  UNSIGNED_ZONES  zones served without it — reachability and agreement only
-  VALIDATORS  recursive resolvers used to confirm the chain of trust
-  WARN_DAYS   alarm when an RRSIG expires within this many days
+  NS          default "label=ip" pairs, space separated
+  VALIDATORS  default recursive resolvers used to confirm the chain of trust
+  WARN_DAYS   default alarm when an RRSIG expires within this many days
   HC_URL      healthchecks.io ping URL (a credential; never in this file)
+
+Zones (normally /etc/dnscheck/zones), one row per zone, five columns:
+  <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->
+
+  "-" in any column takes the default from dnscheck.env. "none" in the
+  validators column skips the chain-of-trust check for a zone that cannot be
+  resolved from outside — an internal zone checked against a public resolver
+  would otherwise report healthy while proving nothing.
 USAGE
 }
 
@@ -98,7 +104,7 @@ conf_get() {  # conf_get <file> <key>  -> prints the value, or nothing
 }
 
 declare -A _src=()
-for _v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
+for _v in NS VALIDATORS WARN_DAYS HC_URL; do
     # An explicit SIGNED_ZONES=... on the command line wins over the file: the
     # documented way to test the alert path is to point the check at a
     # deliberately broken zone, and that must not be silently overridden by the
@@ -140,7 +146,7 @@ unset _v _val
 # filled a gap, an environment variable that won, or which of two duplicate
 # lines was taken.
 show_config() {
-    local v val src n
+    local v val src n i
     printf '%-15s %s\n' 'config file' "$CONF_FILE"
     if [[ -r $CONF_FILE ]]; then
         printf '%-15s %s\n' '' 'readable'
@@ -150,7 +156,7 @@ show_config() {
         printf '%-15s %s\n' '' 'does not exist'
     fi
     printf '\n%-15s %-12s %s\n' 'SETTING' 'FROM' 'VALUE'
-    for v in NS SIGNED_ZONES UNSIGNED_ZONES VALIDATORS WARN_DAYS HC_URL; do
+    for v in NS VALIDATORS WARN_DAYS HC_URL; do
         val=${!v:-}
         src=${_src[$v]:-unset}
         if [[ $v == HC_URL ]]; then
@@ -161,12 +167,160 @@ show_config() {
         fi
         n=''
         case $v in
-            NS|SIGNED_ZONES|UNSIGNED_ZONES|VALIDATORS)
+            NS|VALIDATORS)
                 [[ -n $val ]] && n="  ($(wc -w <<<"$val"))" ;;
         esac
         printf '%-15s %-12s %s%s\n' "$v" "$src" "${val:-—}" "$n"
     done
+
+    # The zone table as RESOLVED, with every '-' already replaced by the
+    # default it stands for. "Which nameservers will this zone actually be
+    # checked against" is the question, and the file cannot answer it.
+    printf '\n%-15s %s\n' 'zones file' "$ZONES_FILE"
+    if (( Z_COUNT )); then
+        printf '\n%-24s %-9s %-5s %-32s %s\n' 'ZONE' 'STATE' 'WARN' 'NAMESERVERS' 'VALIDATORS'
+        for (( i=0; i<Z_COUNT; i++ )); do
+            (( Z_SIGNED[i] )) && src=signed || src=unsigned
+            printf '%-24s %-9s %-5s %-32s %s\n' \
+                "${Z_NAME[i]}" "$src" "${Z_WARN[i]:--}" "${Z_NS[i]}" "${Z_VAL[i]}"
+        done
+    fi
+    if (( ${#ZONE_ERR[@]} )); then
+        printf '\n%s\n' 'PROBLEMS with the zones file:'
+        printf '  %s\n' "${ZONE_ERR[@]}"
+    fi
 }
+
+
+# ------------------------------------------------------------------- zones ---
+#
+# One row per zone, because a zone's nameservers are a fact about that zone.
+# The old SIGNED_ZONES/UNSIGNED_ZONES pair could only say "every zone lives on
+# every nameserver in NS", which is an assumption dressed as configuration: no
+# way to express an internal zone on internal servers beside a public one, and
+# no way to give a zone signed under a different policy its own threshold.
+#
+# A table rather than JSON, deliberately. It takes comments — and in this
+# project the config file IS the documentation — it needs no parser beyond
+# `read`, one '#' disables a zone for an afternoon, and thirty rows still line
+# up in a terminal. It also keeps the topology OUT of dnscheck.env, which can
+# then go on being 0600 root:root and parsed by systemd as root: zone
+# topology is public DNS data, HC_URL is a credential, and only the credential
+# needs that treatment.
+ZONES_FILE=${DNSCHECK_ZONES:-/etc/dnscheck/zones}
+
+Z_NAME=() Z_SIGNED=() Z_WARN=() Z_NS=() Z_VAL=()
+Z_COUNT=0
+ZONE_ERR=()
+
+# Collects EVERY fault rather than dying on the first, and reports each with
+# its line number. Three typos should cost one edit, not three runs.
+#
+# Nothing is appended until the whole row has validated, so a rejected row
+# leaves the arrays exactly as it found them and the five stay in step.
+parse_zones() {
+    local line lineno=0 zone state warn ns vals extra tok i bad
+    local r_warn r_ns r_val
+    if [[ ! -e $ZONES_FILE ]]; then
+        ZONE_ERR+=("$ZONES_FILE does not exist — copy zones.example there and edit it")
+        return
+    fi
+    if [[ ! -r $ZONES_FILE ]]; then
+        ZONE_ERR+=("$ZONES_FILE is not readable by $(id -un) — run this as root")
+        return
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        lineno=$((lineno + 1))
+        # Trailing comments are fine here, unlike dnscheck.env where the rest
+        # of the line is the value. No field can contain a '#'.
+        line=${line%%#*}
+        [[ $line =~ [^[:space:]] ]] || continue
+        read -r zone state warn ns vals extra <<<"$line"
+
+        if [[ -n $extra ]]; then
+            ZONE_ERR+=("line $lineno: more than five columns — a list with a space in it? Use commas inside the nameserver and validator columns")
+            continue
+        fi
+        if [[ -z $vals ]]; then
+            ZONE_ERR+=("line $lineno: expected five columns (zone state warn-days nameservers validators), got: $line")
+            continue
+        fi
+        if [[ ! $zone =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+            ZONE_ERR+=("line $lineno: '$zone' is not a domain name")
+            continue
+        fi
+        bad=0
+        for (( i=0; i<Z_COUNT; i++ )); do
+            [[ ${Z_NAME[i]} == "$zone" ]] && { ZONE_ERR+=("line $lineno: $zone is listed twice"); bad=1; }
+        done
+        (( bad )) && continue
+        if [[ $state != signed && $state != unsigned ]]; then
+            ZONE_ERR+=("line $lineno: state must be 'signed' or 'unsigned', not '$state'. Which one a zone is gets DECLARED, not detected: a zone whose signing stopped must look broken, not get reclassified as fine.")
+            continue
+        fi
+
+        # --- warn-days
+        if [[ $state == unsigned ]]; then
+            # Empty, not the default. An unsigned zone has no signatures, so
+            # showing it a threshold in --show-config would imply one applies.
+            r_warn=''
+            if [[ $warn != - ]]; then
+                ZONE_ERR+=("line $lineno: $zone is unsigned, so it has no signatures to expire — warn-days must be '-'")
+                continue
+            fi
+        elif [[ $warn == - ]]; then
+            r_warn=${WARN_DAYS:-}
+            # Normalise here as well: the global guard runs after this, and
+            # a leading zero in an arithmetic context is octal.
+            [[ $r_warn =~ ^[0-9]+$ ]] && r_warn=$((10#$r_warn))
+        elif [[ $warn =~ ^[0-9]+$ ]]; then
+            r_warn=$((10#$warn))
+        else
+            ZONE_ERR+=("line $lineno: warn-days must be a whole number of days or '-', not '$warn'")
+            continue
+        fi
+
+        # --- nameservers
+        if [[ $ns == - ]]; then
+            if [[ -z ${NS:-} ]]; then
+                ZONE_ERR+=("line $lineno: nameservers is '-' but no default NS is set in $CONF_FILE")
+                continue
+            fi
+            r_ns=$NS
+        else
+            r_ns=${ns//,/ }
+            bad=0
+            for tok in $r_ns; do
+                [[ $tok == *=* && $tok != =* && $tok != *= ]] && continue
+                ZONE_ERR+=("line $lineno: nameserver '$tok' must be label=ip — the label is what names this server in every alert")
+                bad=1
+            done
+            (( bad )) && continue
+        fi
+
+        # --- validators
+        if [[ $vals == - ]]; then
+            r_val=${VALIDATORS:-}
+            if [[ -z $r_val ]]; then
+                ZONE_ERR+=("line $lineno: validators is '-' but no default VALIDATORS is set in $CONF_FILE")
+                continue
+            fi
+        elif [[ $vals == none ]]; then
+            r_val=none
+        else
+            r_val=${vals//,/ }
+        fi
+
+        Z_NAME+=("$zone")
+        [[ $state == signed ]] && Z_SIGNED+=(1) || Z_SIGNED+=(0)
+        Z_WARN+=("$r_warn")
+        Z_NS+=("$r_ns")
+        Z_VAL+=("$r_val")
+        Z_COUNT=$((Z_COUNT + 1))
+    done < "$ZONES_FILE"
+    (( Z_COUNT )) || ZONE_ERR+=("$ZONES_FILE lists no zones")
+}
+parse_zones
 
 # Before the config VALIDATION below, deliberately: an incomplete or wrong
 # config is exactly when you want to see what was actually read, and a flag
@@ -188,24 +342,34 @@ cfg_missing() {
 }
 
 [[ -n ${NS:-}    ]] || cfg_missing NS
-# Either list alone is a valid configuration: a site with no signed zones is
-# not a misconfigured site.
-# ZONES was split into SIGNED_ZONES and UNSIGNED_ZONES. Refuse a config still
-# using it, rather than treating it as unset: an unread key is just an unused
-# variable, so the old name would parse fine, run fine, and check nothing —
-# and the check would go green having quietly stopped watching every zone in
-# it. Refusing is loud and takes one edit to clear.
-if [[ -z ${SIGNED_ZONES:-} && -z ${UNSIGNED_ZONES:-} ]]    && grep -qE '^[[:space:]]*ZONES[[:space:]]*=' "$CONF_FILE" 2>/dev/null; then
-    printf 'ZONES has been split in two, in %s:\n\n' "$CONF_FILE" >&2
-    printf '  SIGNED_ZONES=    zones served with DNSSEC — signatures and chain of trust checked\n' >&2
-    printf '  UNSIGNED_ZONES=  zones served without it — reachability and serial agreement only\n' >&2
-    printf '\nA zone in the wrong list is not cosmetic: an unsigned zone listed as signed\n' >&2
-    printf 'alarms constantly for RRSIGs that were never meant to exist, and a signed one\n' >&2
-    printf 'listed as unsigned has its signature expiry go unwatched.\n' >&2
+# The zone lists moved out of dnscheck.env and into their own table, so that a
+# zone can carry its own nameservers, its own validators and its own expiry
+# threshold. Refuse the old keys rather than ignore them: an unread key is just
+# an unused variable, so a config still using them would parse fine, run fine,
+# and check whatever the zones file happened to say — or nothing at all — while
+# looking exactly like a working config. Refusing is loud and takes one edit.
+for _old in ZONES SIGNED_ZONES UNSIGNED_ZONES; do
+    grep -qE "^[[:space:]]*$_old[[:space:]]*=" "$CONF_FILE" 2>/dev/null || continue
+    printf '%s in %s: the zone lists now live in %s, one row per zone.\n\n' \
+        "$_old" "$CONF_FILE" "$ZONES_FILE" >&2
+    printf '  <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->\n\n' >&2
+    printf 'A zone keeps its own nameservers there, so an internal zone on internal\n' >&2
+    printf 'servers can sit beside a public one, and "none" in the last column skips\n' >&2
+    printf 'the chain-of-trust check for a zone no outside resolver can see. Delete\n' >&2
+    printf '%s from %s once the rows are in place.\n' "$_old" "$CONF_FILE" >&2
+    exit 3
+done
+unset _old
+
+# Reported together, with line numbers, and only now — --show-config above
+# prints them too, and a broken config is exactly when you want to look.
+if (( ${#ZONE_ERR[@]} )); then
+    printf 'cannot read the zone table:\n\n' >&2
+    printf '  %s\n' "${ZONE_ERR[@]}" >&2
+    printf '\nEach row is: <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->\n' >&2
+    printf 'See zones.example, or run --show-config to see what was read.\n' >&2
     exit 3
 fi
-
-[[ -n ${SIGNED_ZONES:-} || -n ${UNSIGNED_ZONES:-} ]] || cfg_missing 'SIGNED_ZONES or UNSIGNED_ZONES'
 # Not needed for --no-ping, which exists precisely so the checks can be
 # exercised before there is a healthchecks.io check to point at.
 ((no_ping)) || [[ -n ${HC_URL:-} ]] || cfg_missing HC_URL
@@ -239,7 +403,7 @@ now=$(date -u +%s)
 # than as a silent exit — an exit here would look identical to "all healthy"
 # to everything except the journal.
 command -v dig >/dev/null 2>&1 \
-    || { note 'dig is not installed (apt install bind9-dnsutils) — no checks ran'; SIGNED_ZONES=''; UNSIGNED_ZONES=''; }
+    || { note 'dig is not installed (apt install bind9-dnsutils) — no checks ran'; Z_COUNT=0; }
 
 # RRSIG inception/expiry timestamps are YYYYMMDDHHMMSS, always UTC.
 epoch() {
@@ -298,7 +462,7 @@ check_rrsig() {
         # one, and "EXPIRED 0d ago" reads like a rounding artefact rather than
         # an emergency.
         note "$zone @$name: $type RRSIG EXPIRED $(( (now - best + 3599) / 3600 ))h ago ($best_exp) — resolvers are already failing"
-    elif (( (best - now) / 86400 < WARN_DAYS )); then
+    elif (( (best - now) / 86400 < WARN_ACTIVE )); then
         note "$zone @$name: $type RRSIG expires in $(( (best - now) / 86400 ))d ($best_exp)"
     fi
 
@@ -397,21 +561,28 @@ soa_serial() {
     auth_query "$1" "$2" SOA | awk '$4=="SOA"{print $7; exit}'
 }
 
-ns_total=$(wc -w <<<"$NS")
-v_total=$(wc -w <<<"$VALIDATORS")
-
-# One list, each entry carrying whether DNSSEC is expected of it.
-zone_list=()
-for _z in ${SIGNED_ZONES:-};   do zone_list+=("1 $_z"); done
-for _z in ${UNSIGNED_ZONES:-}; do zone_list+=("0 $_z"); done
-unset _z
-
-for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
-    signed=${_entry%% *}
-    zone=${_entry#* }
+# Per zone now, not per run: the table gives each zone its own nameservers,
+# its own validators and its own expiry threshold.
+for (( zi=0; zi<Z_COUNT; zi++ )); do
+    zone=${Z_NAME[zi]}
+    signed=${Z_SIGNED[zi]}
+    zone_ns=${Z_NS[zi]}
+    zone_val=${Z_VAL[zi]}
+    # check_rrsig reads this rather than the global: the threshold tracks the
+    # SIGNING POLICY — BIND's 14-day/5-day resign cycle is the whole reason it
+    # is 3 — and policy belongs to the zone, not to the host running the check.
+    WARN_ACTIVE=${Z_WARN[zi]}
+    # 'none' means the zone was DECLARED unresolvable from outside. An empty
+    # list makes the validator loop run zero times; the notes that would fire
+    # on zero validators are suppressed below, because "not checked" and
+    # "checked and unreachable" are different findings.
+    zone_val_list=$zone_val
+    [[ $zone_val == none ]] && zone_val_list=''
+    ns_total=$(wc -w <<<"$zone_ns")
+    v_total=$(wc -w <<<"$zone_val_list")
     answered=0 serials='' details='' min_days='' unsigned_ns=''
 
-    for pair in $NS; do
+    for pair in $zone_ns; do
         name=${pair%%=*}; ip=${pair#*=}
         if check_ns "$zone" "$name" "$ip" "$signed"; then
             ((answered++))
@@ -444,7 +615,7 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     if (( distinct > 1 )); then
         sleep 20
         recheck=''
-        for pair in $NS; do
+        for pair in $zone_ns; do
             name=${pair%%=*}; ip=${pair#*=}
             s=$(soa_serial "$zone" "$ip")
             [[ -n $s ]] && recheck+="$name:$s "
@@ -468,7 +639,7 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # denial-of-existence proof — the half of DNSSEC that breaks quietly.
     # The rcode does not matter here; the AD flag does.
     v_answered=0 v_ad=0 no_ad='' ad_from='' resolved_by='' ad_unexpected='' servfail_from=''
-    for v in $VALIDATORS; do
+    for v in $zone_val_list; do
         # Timestamp AND randomness. $RANDOM alone is 0-32767 and its
         # concatenation is not uniform, so a label CAN repeat — and a repeat
         # inside the zone's negative-cache TTL (the SOA minimum, commonly an
@@ -507,8 +678,8 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
             resolved_by+="$v "
         fi
     done
-    (( v_answered == 0 )) \
-        && note "$zone: no validator reachable ($VALIDATORS) — chain of trust unconfirmed"
+    [[ $zone_val != none ]] && (( v_answered == 0 )) \
+        && note "$zone: no validator reachable ($zone_val) — chain of trust unconfirmed"
 
     # Named together, reported once. A stale DS breaks a zone for EVERY
     # validating resolver, and a zone in the wrong list is one fact about the
@@ -527,7 +698,14 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
         u_count=0
         [[ -n $unsigned_ns ]] && u_count=$(wc -w <<<"$unsigned_ns")
 
-        if (( u_count > 0 && u_count == answered && v_ad == 0 )); then
+        if [[ $zone_val == none ]] && (( u_count > 0 && u_count == answered )); then
+            # No signatures anywhere, and no outside view to cross-check
+            # against. Say exactly that rather than guessing: with validators
+            # 'none' the check genuinely cannot tell a zone whose signing
+            # stopped from one that was never signed, and picking either
+            # would be inventing a diagnosis it has no evidence for.
+            note "$zone: no nameserver serves signatures, and validators are 'none' for this zone — either signing has stopped or it is not a signed zone, and the check cannot tell which"
+        elif (( u_count > 0 && u_count == answered && v_ad == 0 )); then
             # Unanimous: no nameserver serves signatures and no validator sees
             # a chain. This is not a zone whose signing broke, it is a zone
             # that was never signed, sitting in the wrong list. ONE line that
@@ -557,7 +735,16 @@ for _entry in ${zone_list[@]+"${zone_list[@]}"}; do
     # the server or resolver it came from, which is what makes the line
     # evidence rather than an assertion. It stays ONE line per zone: nine
     # lines a run would bury the problem lines they sit among.
-    if ((signed)); then
+    # "not checked" must never render as "checked and fine". A zone with
+    # validators 'none' says so on its own line, every run, so the gap is
+    # visible in the journal rather than inferred from the zones file.
+    if [[ $zone_val == none ]]; then
+        if ((signed)); then
+            info "$zone: $answered/$ns_total NS up [${details% }], no outside validation (validators none)"
+        else
+            info "$zone: $answered/$ns_total NS up [${details% }], unsigned, no outside validation (validators none)"
+        fi
+    elif ((signed)); then
         info "$zone: $answered/$ns_total NS up [${details% }], AD from ${ad_from:-none}"
     else
         info "$zone: $answered/$ns_total NS up [${details% }], unsigned, resolved by ${resolved_by:-none}"

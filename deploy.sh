@@ -15,6 +15,7 @@ LIB_DIR=/usr/local/lib/dnscheck
 CONF_DIR=/etc/dnscheck
 UNIT_DIR=/etc/systemd/system
 CONF_FILE="$CONF_DIR/dnscheck.env"
+ZONES_FILE="$CONF_DIR/zones"
 
 DRY_RUN=0
 NO_RELOAD=0
@@ -31,6 +32,7 @@ Places:
   /usr/local/lib/dnscheck/     check-dns.sh, NOTES.md      0755 root:root
   /etc/dnscheck/               config directory            0755 root:root
   /etc/dnscheck/dnscheck.env   your config                 0600 root:root
+  /etc/dnscheck/zones          your zone table             0644 root:root
   /etc/systemd/system/         dnscheck.{service,timer}    0644 root:root
 
 Never touched: an existing dnscheck.env. The .example is only ever copied in
@@ -167,15 +169,34 @@ if [[ -f $CONF_FILE ]]; then
         && note "$CONF_FILE still has the placeholder HC_URL — paste the real ping URL"
     grep -qE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.' "$CONF_FILE" 2>/dev/null \
         && note "$CONF_FILE still lists RFC 5737 documentation addresses in NS — put your real nameservers in"
-    grep -qE '^[[:space:]]*(UN)?SIGNED_ZONES=.*example\.(com|net|org)' "$CONF_FILE" 2>/dev/null \
-        && note "$CONF_FILE still lists example.com/.net/.org as a zone — put your real zones in"
-    grep -qE '^[[:space:]]*ZONES[[:space:]]*=' "$CONF_FILE" 2>/dev/null \
-        && note "$CONF_FILE uses ZONES=, which was split into SIGNED_ZONES= and UNSIGNED_ZONES= — the check refuses to run until you split it"
+    grep -qE '^[[:space:]]*(ZONES|SIGNED_ZONES|UNSIGNED_ZONES)[[:space:]]*=' "$CONF_FILE" 2>/dev/null \
+        && note "$CONF_FILE still lists zones. They moved to $ZONES_FILE, one row per zone — the check refuses to run until the old key is deleted"
     true
 else
     printf '  install:   %s (from the example — EDIT IT)\n' "$CONF_FILE"
     run install -m 0600 -o root -g root dnscheck.env.example "$CONF_FILE"
-    note "edit $CONF_FILE: replace the placeholder NS, SIGNED_ZONES/UNSIGNED_ZONES and HC_URL - the example ships documentation values only"
+    note "edit $CONF_FILE: replace the placeholder NS and HC_URL — the example ships documentation values only"
+fi
+
+# The zone table. 0644, not 0600: it is not a credential — zone names and
+# authoritative addresses are public DNS data — and the check reads it as the
+# unprivileged service user, which cannot read a root-only file. HC_URL is the
+# credential, and it stays in dnscheck.env where systemd parses it as root.
+if [[ -f $ZONES_FILE ]]; then
+    printf '  keeping:   %s (never overwritten)\n' "$ZONES_FILE"
+    cur=$(stat -c '%a' "$ZONES_FILE" 2>/dev/null || echo '')
+    if [[ $cur != 644 ]]; then
+        printf '  mode %s -> 644: %s\n' "$cur" "$ZONES_FILE"
+        run chmod 0644 "$ZONES_FILE"
+        run chown root:root "$ZONES_FILE"
+    fi
+    grep -qE '^[[:space:]]*example\.(com|net|org)[[:space:]]' "$ZONES_FILE" 2>/dev/null \
+        && note "$ZONES_FILE still lists example.com/.net/.org — put your real zones in"
+    true
+else
+    printf '  install:   %s (from the example — EDIT IT)\n' "$ZONES_FILE"
+    run install -m 0644 -o root -g root zones.example "$ZONES_FILE"
+    note "edit $ZONES_FILE: one row per zone — <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->"
 fi
 say ''
 
@@ -226,9 +247,12 @@ verify before arming, in this order:
      (sudo matters: without it journalctl prints "-- No entries --" rather than
       an error, unless your account is in the adm or systemd-journal group)
 
-  3. the ALERT path, not just the ping path. Point it at a zone that is broken
-     on purpose and confirm the notification actually reaches you:
-     sudo SIGNED_ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
+  3. the ALERT path, not just the ping path. Point it at a throwaway zone
+     table naming a zone that is broken on purpose, and confirm the
+     notification actually reaches you:
+     printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
+     sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
+     rm /tmp/alert.zones
 
   4. arm it
      sudo systemctl enable --now dnscheck.timer

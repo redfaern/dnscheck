@@ -78,5 +78,80 @@ is 'epoch of a known RRSIG stamp' "$(epoch 20260910000000)" '1788998400'
 epoch 'not-a-timestamp' >/dev/null 2>&1 && is 'junk rejected' no yes || is 'junk rejected' yes yes
 epoch '' >/dev/null 2>&1 && is 'empty rejected' no yes || is 'empty rejected' yes yes
 
+
+# --- the zone table -----------------------------------------------------------
+#
+# The parser is the other place a mistake is silent: a row that fails to parse
+# and is skipped without a word means a zone stops being checked while the run
+# still goes green. Every case below asserts on what the RUN would do, by
+# driving the real script through --show-config rather than reimplementing the
+# parsing here — a copy of the logic would only test the copy.
+
+SCRIPT=$(dirname "$(readlink -f "$0")")/check-dns.sh
+TD=$(mktemp -d) || exit 1
+trap 'rm -rf "$TD"' EXIT
+cat > "$TD/env" <<'CONF'
+NS=ns1=192.0.2.1 ns2=192.0.2.2
+VALIDATORS=1.1.1.1 8.8.8.8
+WARN_DAYS=3
+HC_URL=https://hc-ping.com/x
+CONF
+
+zt() {  # zt <zones-file-body> -> the resolved table rows, one per line
+    printf '%s\n' "$1" > "$TD/zones"
+    DNSCHECK_CONF="$TD/env" DNSCHECK_ZONES="$TD/zones" bash "$SCRIPT" --show-config 2>&1 |
+        sed -n '/^ZONE  */,$p' | tail -n +2 | sed 's/  */ /g;s/ $//'
+}
+zerr() { # zerr <zones-file-body> -> the parse errors, one per line
+    printf '%s\n' "$1" > "$TD/zones"
+    DNSCHECK_CONF="$TD/env" DNSCHECK_ZONES="$TD/zones" bash "$SCRIPT" --no-ping 2>&1 |
+        sed -n 's/^  line /line /p'
+}
+
+is 'defaults fill every "-"' \
+   "$(zt 'a.com signed - - -')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+is 'a zone overrides the default nameservers' \
+   "$(zt 'a.com signed - x=10.0.0.1,y=10.0.0.2 -')" 'a.com signed 3 x=10.0.0.1 y=10.0.0.2 1.1.1.1 8.8.8.8'
+is 'a zone overrides the default threshold' \
+   "$(zt 'a.com signed 9 - -')" 'a.com signed 9 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+is 'validators none survives to the resolved table' \
+   "$(zt 'a.com signed - - none')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 none'
+is 'an unsigned zone carries no threshold' \
+   "$(zt 'a.com unsigned - - -')" 'a.com unsigned - ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+is 'comments and blank lines are skipped' \
+   "$(zt '# a comment
+
+a.com signed - - -   # trailing comment')" 'a.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+is 'a commented-out zone is not checked' "$(zt '#a.com signed - - -
+b.com signed - - -')" 'b.com signed 3 ns1=192.0.2.1 ns2=192.0.2.2 1.1.1.1 8.8.8.8'
+
+# A bad row must be REPORTED, never silently dropped: a skipped row is a zone
+# that stopped being watched while the check went on reporting success.
+is 'too few columns is an error'   "$(zerr 'a.com signed -')"           'line 1: expected five columns (zone state warn-days nameservers validators), got: a.com signed -'
+is 'a space inside a list is an error' "$(zerr 'a.com signed - x=1 y=2 -')" 'line 1: more than five columns — a list with a space in it? Use commas inside the nameserver and validator columns'
+is 'an unknown state is an error'  "$(zerr 'a.com sined - - -' | cut -d. -f1)" "line 1: state must be 'signed' or 'unsigned', not 'sined'"
+is 'a bare ip without a label is an error' "$(zerr 'a.com signed - 10.0.0.1 -')" "line 1: nameserver '10.0.0.1' must be label=ip — the label is what names this server in every alert"
+is 'a threshold on an unsigned zone is an error' "$(zerr 'a.com unsigned 5 - -')" "line 1: a.com is unsigned, so it has no signatures to expire — warn-days must be '-'"
+is 'a duplicate zone is an error' "$(zerr 'a.com signed - - -
+a.com signed - - -')" 'line 2: a.com is listed twice'
+is 'every fault in one pass, not the first only' \
+   "$(zerr 'a.com sined - - -
+b.com signed x - -' | wc -l)" '2'
+
+# The resolved table above proves a zone's threshold was READ. This proves it
+# is the one actually applied: without it, dropping the per-zone value and
+# using the global default everywhere passes every other test in this file.
+now=$(date -u +%s)
+problems=()
+note() { problems+=("$1"); }
+eval "$(sed -n '/^check_rrsig() {/,/^}/p' "$SCRIPT")"
+sig5=$(date -u -d "@$(( now + 5*86400 ))" +%Y%m%d%H%M%S)
+rrset="a.com. 3600 IN RRSIG SOA 13 2 3600 $sig5 20260101000000 1 a.com. AA=="
+
+problems=(); WARN_ACTIVE=3;  check_rrsig "$rrset" a.com ns1 SOA >/dev/null
+is 'threshold 3: five days left is quiet' "${#problems[@]}" '0'
+problems=(); WARN_ACTIVE=9;  check_rrsig "$rrset" a.com ns1 SOA >/dev/null
+is 'threshold 9: the same signature alarms' "${#problems[@]}" '1'
+is 'and says how long is left' "${problems[0]#*RRSIG }" "expires in 5d ($sig5)"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 (( fail == 0 ))

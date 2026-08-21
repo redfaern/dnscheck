@@ -85,21 +85,43 @@ the email is a safety net, not a schedule.
 
 ## Design notes
 
-**Signed and unsigned zones are DECLARED, not detected.** `SIGNED_ZONES` gets
-the full DNSSEC checks; `UNSIGNED_ZONES` gets reachability, authority and serial
-agreement only. Both lists are optional individually — a site with no signed
-zones is not a misconfigured site.
+**One row per zone, in `/etc/dnscheck/zones`.** A zone's nameservers are a fact
+about that zone, not about the host running the check. The earlier
+`SIGNED_ZONES`/`UNSIGNED_ZONES` pair could only say "every zone lives on every
+nameserver in `NS`" — an assumption dressed as configuration, with no way to
+express an internal zone on internal servers beside a public one, and no way to
+give a zone signed under a different policy its own expiry threshold. A `-` in
+any column takes the default from `dnscheck.env`, so the simple case stays one
+short row.
+
+A table rather than JSON, deliberately. It takes comments, and in this project
+the config file *is* the documentation; it needs no parser beyond `read`, so no
+`jq` dependency; one `#` disables a zone for an afternoon; and thirty rows still
+line up in a terminal. It also keeps the topology out of `dnscheck.env`, which
+goes on being 0600 root:root and parsed by systemd as root — zone topology is
+public DNS data, `HC_URL` is a credential, and only the credential needs that.
+
+**`validators none` is the honest answer for a zone no outside resolver can
+see.** Without it an internal zone reports healthy forever: a public resolver
+asked about `example.lan` returns NXDOMAIN, the check counts that as an answer,
+and nothing about the zone has actually been verified. Declaring `none` makes
+the gap visible on the summary line every run instead. If there is an internal
+validating resolver, naming it in that column gets the real check back.
+
+**Signed and unsigned are DECLARED, not detected.** A zone marked `signed` gets
+the full DNSSEC checks; `unsigned` gets reachability, authority and serial
+agreement only.
 
 Auto-detecting it would be easy and wrong. "This zone has no DNSKEY, so it must
 be unsigned" reclassifies a zone whose signing has STOPPED as working exactly as
 intended — the precise failure the tool exists to catch, converted into silence.
 Being signed is a fact about your intent, so you state it, and moving a zone
-between the lists is the deliberate act of changing that intent.
+between the two is the deliberate act of changing that intent.
 
-Both errors are caught rather than assumed away. An unsigned zone in
-`SIGNED_ZONES` alarms about RRSIGs that were never meant to exist, loudly and
-immediately. A signed zone in `UNSIGNED_ZONES` is reported the first time a
-validator returns AD for it — that direction is the expensive one, because the
+Both errors are caught rather than assumed away. A zone marked `signed` that is
+not alarms about RRSIGs that were never meant to exist, loudly and immediately.
+One marked `unsigned` that is signed is reported the first time a validator
+returns AD for it — that direction is the expensive one, because the
 zone works fine while its signature expiry goes unwatched.
 
 **`WARN_DAYS` is measured against the resigning floor, not the signature
@@ -131,8 +153,8 @@ made after every nameserver and both validators have been heard from:
 - **Partial** — some servers serve signatures and others do not. That one IS a
   fault, and a serious one, so the offending server is named.
 
-The first version reported eight problems for an unsigned zone added to
-`SIGNED_ZONES`, none of which named the cause. Eight accurate symptoms that
+The first version reported eight problems for an unsigned zone marked
+`signed`, none of which named the cause. Eight accurate symptoms that
 leave you to work out the diagnosis are worse than one line that has already
 done it — an alert is only worth sending if it tells you what to do.
 
@@ -184,8 +206,8 @@ how a misconfigured run comes to look like a passing one.
 
 **The config is parsed, not sourced.** The format is systemd's
 `EnvironmentFile`, and bash disagrees with systemd about the most ordinary line
-in it: `SIGNED_ZONES=a.com b.com` is one value to systemd, but to bash it is
-two assignments — it becomes just `a.com`, and `b.com` becomes a stray variable
+in it: `NS=ns1=192.0.2.1 ns2=192.0.2.2` is one value to systemd, but to bash it is
+two assignments — it becomes just the first pair, and the second becomes a stray variable
 nothing reads. It does not error. A config listing three nameservers would
 quietly check one and report "1 of 1 up": a green check that had stopped
 watching two thirds of what it was pointed at.
@@ -269,10 +291,13 @@ sudo journalctl -u dnscheck -n 30 --no-pager
 # sudo on journalctl matters: without it you get "-- No entries --" rather
 # than an error, unless your account is in the adm or systemd-journal group.
 
-# 3. The ALERT path, not just the ping path. Point SIGNED_ZONES at a zone that is
-#    permanently broken on purpose (dnssec-failed.org is maintained for exactly
-#    this) and confirm the notification actually reaches you.
-sudo SIGNED_ZONES=dnssec-failed.org /usr/local/lib/dnscheck/check-dns.sh
+# 3. The ALERT path, not just the ping path. Point the check at a throwaway
+#    zone table naming a zone that is broken on purpose (dnssec-failed.org is
+#    maintained for exactly this) plus an address that will not answer, and
+#    confirm the notification actually reaches you.
+printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
+sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
+rm /tmp/alert.zones
 
 # 4. Arm it.
 sudo systemctl enable --now dnscheck.timer
@@ -352,9 +377,9 @@ stopped" is declared. Ten extra minutes of certainty there is cheap; a false
   server that is down rather than one that has moved. Comparing the configured
   set against the parent's NS RRset would catch it — left out deliberately,
   because it means trusting a lookup to tell you whether lookups work.
-- **A zone is only checked once it is in one of the lists.** Nothing discovers
-  a new zone; adding one is a config edit, as is moving a newly signed zone from
-  `UNSIGNED_ZONES` to `SIGNED_ZONES`. That is the same consent-by-edit rule used
+- **A zone is only checked once it has a row.** Nothing discovers a new zone;
+  adding one is a config edit, as is changing a newly signed zone from
+  `unsigned` to `signed`. That is the same consent-by-edit rule used
   elsewhere here, and the AD-on-an-unsigned-zone check covers the second half of
   it — but a zone can still be live and entirely unmonitored until someone
   remembers to add it.

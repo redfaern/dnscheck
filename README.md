@@ -9,8 +9,9 @@ reports to healthchecks.io, which owns notification and the dead-man's switch.
 
 ## What it checks
 
-Zones are declared in two lists. **Both** lists get the service checks;
-`SIGNED_ZONES` additionally gets the DNSSEC ones.
+Zones are declared one per row in `/etc/dnscheck/zones`, each carrying its own
+nameservers, validators and expiry threshold. **Every** zone gets the service
+checks; those declared `signed` additionally get the DNSSEC ones.
 
 Per zone, against each nameserver you list:
 
@@ -63,8 +64,9 @@ cd dnscheck-main
 ./deploy.sh --dry-run
 sudo ./deploy.sh
 
-# 4. put your nameservers, zones and ping URL in
+# 4. put your defaults and ping URL in, then your zones
 sudo nano /etc/dnscheck/dnscheck.env
+sudo nano /etc/dnscheck/zones
 
 # 5. confirm the run will use what you think it will
 sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
@@ -77,15 +79,23 @@ alert path, arm:
 sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping        # 1. the checks
 sudo systemctl start dnscheck.service                      # 2. the sandbox
 sudo journalctl -u dnscheck -n 30 --no-pager
-sudo SIGNED_ZONES=dnssec-failed.org \
-     /usr/local/lib/dnscheck/check-dns.sh                  # 3. the ALERT path
 sudo systemctl enable --now dnscheck.timer                 # 4. arm it
 ```
 
-Step 3 is the one people skip, and it is the only one that proves the alert
-reaches you. `dnssec-failed.org` is maintained as a permanently broken zone for
-exactly this. It pings for real, so the check goes down and then recovers on
-the next run.
+Step 3 is the ALERT path, the step people skip, and the only one that proves
+the notification actually reaches you. Point the check at a throwaway zone
+table rather than your real one:
+
+```sh
+printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
+sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
+rm /tmp/alert.zones
+```
+
+`dnssec-failed.org` is maintained as a permanently broken zone for exactly
+this, so the validators report a chain that will not validate, and the
+unreachable address adds a second, different failure. It pings for real, so
+the check goes down and then recovers on the next scheduled run.
 
 To update later, repeat steps 2 and 3. `deploy.sh` is idempotent, reports what
 it changed, and never touches an existing `dnscheck.env`.
@@ -108,6 +118,7 @@ any host without systemd.
 | `check-dns.sh` | `/usr/local/lib/dnscheck/` | 0755 root:root |
 | `NOTES.md` | `/usr/local/lib/dnscheck/` | 0644 root:root |
 | `dnscheck.env.example` | `/etc/dnscheck/dnscheck.env` | 0600 root:root, dir 0755 |
+| `zones.example` | `/etc/dnscheck/zones` | 0644 root:root |
 | `dnscheck.service`, `dnscheck.timer` | `/etc/systemd/system/` | 0644 root:root |
 
 `dnscheck.env` holds `HC_URL`, which **is a credential** — anyone with it can
