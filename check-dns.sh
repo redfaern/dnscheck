@@ -478,8 +478,29 @@ auth_query() {
 hdr_status() { sed -n 's/.*status: \([A-Z]*\).*/\1/p' <<<"$1" | head -1; }
 hdr_flags()  { sed -n 's/^;; flags: \([^;]*\);.*/\1/p'  <<<"$1" | head -1; }
 
+# Seconds -> the largest unit that says something, because a fixed unit lies at
+# one end or the other. Days truncate to "0d" for anything inside 24 hours, so
+# a signature with eleven hours left and one with eleven minutes read the same,
+# and both read as though nothing is happening. Hours would say "720h" for a
+# zone that stopped resigning a month ago.
+#
+# Truncating, not rounding, in both directions. For time REMAINING that is the
+# cautious way round — 11h59m reads as 11h. For time ELAPSED since an expiry it
+# is the other way, and 11h59m ago also reads as 11h; that is accepted rather
+# than special-cased, because once a signature has expired the magnitude
+# changes nothing. Resolvers are already failing at one hour and at one week,
+# and the message says so.
+human_span() {  # 793000 -> 9d ; 40000 -> 11h ; 2600 -> 43m ; 30 -> <1m
+    local s=${1-0}
+    if   (( s >= 86400 )); then printf '%dd' $(( s / 86400 ))
+    elif (( s >= 3600 ));  then printf '%dh' $(( s / 3600 ))
+    elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
+    else printf '<1m'
+    fi
+}
+
 # Check the RRSIG covering one RRset for presence and remaining life.
-# Sets RRSIG_DAYS on success.
+# Sets RRSIG_SECS on success.
 check_rrsig() {
     local out=$1 zone=$2 name=$3 type=$4 exps exp ee best='' best_exp=''
 
@@ -517,24 +538,24 @@ check_rrsig() {
         # Hours, not days: this branch's most likely reading is now a sub-day
         # one, and "EXPIRED 0d ago" reads like a rounding artefact rather than
         # an emergency.
-        note "$zone @$name: $type RRSIG EXPIRED $(( (now - best + 3599) / 3600 ))h ago ($best_exp) — resolvers are already failing"
+        note "$zone @$name: $type RRSIG EXPIRED $(human_span $(( now - best ))) ago ($best_exp) — resolvers are already failing"
     elif (( (best - now) / 86400 < WARN_ACTIVE )); then
-        note "$zone @$name: $type RRSIG expires in $(( (best - now) / 86400 ))d ($best_exp)"
+        note "$zone @$name: $type RRSIG expires in $(human_span $(( best - now ))) ($best_exp)"
     fi
 
-    # The coarse day count is fine here: it only feeds min_days and the summary
-    # line, where a negative number still reads correctly.
-    RRSIG_DAYS=$(( (best - now) / 86400 ))
+    # Seconds, formatted at the point of display. One representation, so the
+    # summary and the problem lines cannot disagree about the same signature.
+    RRSIG_SECS=$(( best - now ))
     return 0
 }
 
-# One nameserver, one zone. Sets NS_SERIAL and NS_RRSIG_DAYS; appends its own
+# One nameserver, one zone. Sets NS_SERIAL and NS_RRSIG_SECS; appends its own
 # notes rather than returning them, so it must never run in a subshell — an
 # array appended to inside $(...) is discarded when the subshell exits.
 check_ns() {
-    local zone=$1 name=$2 ip=$3 signed=$4 out status flags soa_days
+    local zone=$1 name=$2 ip=$3 signed=$4 out status flags soa_secs
     NS_SERIAL=''
-    NS_RRSIG_DAYS=''
+    NS_RRSIG_SECS=''
     NS_UNSIGNED=0
     NS_AA=0
 
@@ -604,23 +625,23 @@ check_ns() {
         return 0
     fi
 
-    RRSIG_DAYS=''
+    RRSIG_SECS=''
     check_rrsig "$out" "$zone" "$name" SOA
-    soa_days=$RRSIG_DAYS
+    soa_secs=$RRSIG_SECS
 
     # The DNSKEY RRset is signed by the KSK on its own schedule, so its
     # signatures can expire while the SOA's are still fresh. Checking only the
     # SOA would miss a stalled KSK resign right up until the zone went dark.
     out=$(auth_query "$zone" "$ip" DNSKEY)
     if [[ -n $out && $(hdr_status "$out") == NOERROR ]]; then
-        RRSIG_DAYS=''
+        RRSIG_SECS=''
         check_rrsig "$out" "$zone" "$name" DNSKEY
-        [[ -n $RRSIG_DAYS && -n $soa_days ]] && (( RRSIG_DAYS < soa_days )) && soa_days=$RRSIG_DAYS
+        [[ -n $RRSIG_SECS && -n $soa_secs ]] && (( RRSIG_SECS < soa_secs )) && soa_secs=$RRSIG_SECS
     else
         note "$zone @$name: DNSKEY query failed — cannot check the KSK signature"
     fi
 
-    NS_RRSIG_DAYS=$soa_days
+    NS_RRSIG_SECS=$soa_secs
     return 0
 }
 
@@ -648,7 +669,7 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     [[ $zone_val == none ]] && zone_val_list=''
     ns_total=$(wc -w <<<"$zone_ns")
     v_total=$(wc -w <<<"$zone_val_list")
-    answered=0 serials='' details='' min_days='' unsigned_ns=''
+    answered=0 serials='' details='' unsigned_ns=''
 
     for pair in $zone_ns; do
         name=${pair%%=*}; ip=${pair#*=}
@@ -662,10 +683,14 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
             # only the caller knows this server answered at all.
             detail="$name:${NS_SERIAL:-noserial}"
             ((NS_AA)) && detail+=" aa"
-            if [[ -n $NS_RRSIG_DAYS ]]; then
-                detail+=" ${NS_RRSIG_DAYS}d"
-                [[ -z $min_days ]] && min_days=$NS_RRSIG_DAYS
-                (( NS_RRSIG_DAYS < min_days )) && min_days=$NS_RRSIG_DAYS
+            if [[ -n $NS_RRSIG_SECS ]]; then
+                # An expired signature says so rather than counting down past
+                # zero; the problem line above carries how long ago.
+                if (( NS_RRSIG_SECS < 0 )); then
+                    detail+=" EXPIRED"
+                else
+                    detail+=" $(human_span "$NS_RRSIG_SECS")"
+                fi
             fi
             details+="$detail, "
         fi

@@ -287,36 +287,48 @@ account to create, remember, or forget to lock.
 ## Deploy
 
 ```sh
-sudo apt install bind9-dnsutils curl        # dig, if not already present
+sudo apt install bind9-dnsutils curl        # dig and curl, if not already present
+sudo ./deploy.sh --dry-run                  # every action, changing nothing
+sudo ./deploy.sh
+```
 
-sudo install -d -m 0755 /usr/local/lib/dnscheck
-sudo install -m 0755 -o root -g root check-dns.sh /usr/local/lib/dnscheck/
-sudo install -m 0644 -o root -g root NOTES.md    /usr/local/lib/dnscheck/
+`deploy.sh` is the only install path, deliberately. This section used to carry
+the `install` commands written out by hand, and they drifted: they still
+created `/etc/dnscheck` as 0700 after the script had moved to 0755, and they
+never mentioned the zone table at all. Two copies of the truth, one of them
+quietly wrong. The script places the files, sets the modes, checks that `dig`,
+`curl` and a new enough systemd are present, and reports what is still to do.
 
-sudo install -d -m 0700 /etc/dnscheck
-sudo install -m 0600 -o root -g root dnscheck.env.example /etc/dnscheck/dnscheck.env
-sudo nano /etc/dnscheck/dnscheck.env         # paste the HC_URL, confirm the IPs
+It never overwrites `/etc/dnscheck/dnscheck.env` or `/etc/dnscheck/zones`. When
+either is missing it drops the matching `.example` in for you to edit, which is
+the only writing it does to your configuration:
 
-sudo install -m 0644 dnscheck.service dnscheck.timer /etc/systemd/system/
-sudo systemctl daemon-reload
+```sh
+sudo nano /etc/dnscheck/dnscheck.env        # the HC_URL, and the defaults
+sudo nano /etc/dnscheck/zones               # one row per zone
 ```
 
 Verify before arming, in this order:
 
 ```sh
-# 1. The checks themselves, without touching healthchecks.io. The script reads
-#    /etc/dnscheck/dnscheck.env itself, so this exercises the REAL config —
-#    but run it as root, because that file is 0600.
+# 1. What the run will ACTUALLY use: the resolved zone table, with every "-"
+#    already replaced by the default it stands for. The cheapest step and the
+#    only one that catches a row you did not mean — grep cannot show you a
+#    default that filled a gap. Run it as root: dnscheck.env is 0600.
+sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+
+# 2. The checks themselves, without touching healthchecks.io. The script reads
+#    the config itself, so this exercises the REAL one.
 sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping
 
-# 2. The sandbox — the run above proves the checks work under the real user.
+# 3. The sandbox — the run above proves the checks work under the real user.
 #    This proves the unit file does not block them.
 sudo systemctl start dnscheck.service
 sudo journalctl -u dnscheck -n 30 --no-pager
 # sudo on journalctl matters: without it you get "-- No entries --" rather
 # than an error, unless your account is in the adm or systemd-journal group.
 
-# 3. The ALERT path, not just the ping path. Point the check at a throwaway
+# 4. The ALERT path, not just the ping path. Point the check at a throwaway
 #    zone table naming a zone that is broken on purpose (dnssec-failed.org is
 #    maintained for exactly this) plus an address that will not answer, and
 #    confirm the notification actually reaches you.
@@ -324,12 +336,12 @@ printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
 sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
 rm /tmp/alert.zones
 
-# 4. Arm it.
+# 5. Arm it.
 sudo systemctl enable --now dnscheck.timer
 systemctl list-timers dnscheck.timer
 ```
 
-Step 3 is the one people skip. A dead-man switch you have never seen trip is a
+Step 4 is the one people skip. A dead-man switch you have never seen trip is a
 hypothesis, not a monitor.
 
 One more, once, and then never again — verifying the REMINDER, not just the

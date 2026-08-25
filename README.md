@@ -160,17 +160,17 @@ sudo nano /etc/dnscheck/zones
 sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
 ```
 
-Then the four steps `deploy.sh` prints when it finishes — checks, sandbox,
-alert path, arm:
+Then the rest of the sequence `deploy.sh` prints when it finishes. Step 1 is
+the `--show-config` above:
 
 ```sh
-sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping        # 1. the checks
-sudo systemctl start dnscheck.service                      # 2. the sandbox
+sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping        # 2. the checks
+sudo systemctl start dnscheck.service                      # 3. the sandbox
 sudo journalctl -u dnscheck -n 30 --no-pager
-sudo systemctl enable --now dnscheck.timer                 # 4. arm it
+sudo systemctl enable --now dnscheck.timer                 # 5. arm it
 ```
 
-Step 3 is the ALERT path, the step people skip, and the only one that proves
+Step 4 is the ALERT path, the step people skip, and the only one that proves
 the notification actually reaches you. Point the check at a throwaway zone
 table rather than your real one:
 

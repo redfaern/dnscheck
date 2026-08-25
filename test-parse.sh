@@ -144,7 +144,7 @@ b.com signed x - -' | wc -l)" '2'
 now=$(date -u +%s)
 problems=()
 note() { problems+=("$1"); }
-eval "$(sed -n '/^check_rrsig() {/,/^}/p' "$SCRIPT")"
+eval "$(sed -n '/^human_span() {/,/^}/p;/^check_rrsig() {/,/^}/p' "$SCRIPT")"
 sig5=$(date -u -d "@$(( now + 5*86400 ))" +%Y%m%d%H%M%S)
 rrset="a.com. 3600 IN RRSIG SOA 13 2 3600 $sig5 20260101000000 1 a.com. AA=="
 
@@ -153,6 +153,28 @@ is 'threshold 3: five days left is quiet' "${#problems[@]}" '0'
 problems=(); WARN_ACTIVE=9;  check_rrsig "$rrset" a.com ns1 SOA >/dev/null
 is 'threshold 9: the same signature alarms' "${#problems[@]}" '1'
 is 'and says how long is left' "${problems[0]#*RRSIG }" "expires in 5d ($sig5)"
+
+# human_span picks the largest unit that says something. Days alone truncate to
+# "0d" for everything inside a day, so a signature with eleven hours left and
+# one with eleven minutes read identically — and both read as fine.
+is 'a span of days'   "$(human_span $(( 9 * 86400 + 3600 )))" '9d'
+is 'exactly one day'  "$(human_span 86400)"                   '1d'
+is 'just under a day' "$(human_span $(( 86400 - 1 )))"        '23h'
+is 'a span of hours'  "$(human_span $(( 11 * 3600 )))"        '11h'
+is 'just under an hour' "$(human_span 3599)"                  '59m'
+is 'a span of minutes'  "$(human_span $(( 43 * 60 )))"        '43m'
+is 'less than a minute' "$(human_span 30)"                    '<1m'
+is 'zero'               "$(human_span 0)"                     '<1m'
+
+problems=(); WARN_ACTIVE=3
+sig11h=$(date -u -d "@$(( now + 11 * 3600 ))" +%Y%m%d%H%M%S)
+check_rrsig "a.com. 3600 IN RRSIG SOA 13 2 3600 $sig11h 20260101000000 1 a.com. AA==" a.com ns1 SOA >/dev/null
+is 'eleven hours left reports hours, not 0d' "${problems[0]#*RRSIG }" "expires in 11h ($sig11h)"
+
+problems=(); exp11h=$(date -u -d "@$(( now - 11 * 3600 ))" +%Y%m%d%H%M%S)
+check_rrsig "a.com. 3600 IN RRSIG SOA 13 2 3600 $exp11h 20260101000000 1 a.com. AA==" a.com ns1 SOA >/dev/null
+is 'expired eleven hours ago says so in hours' "${problems[0]#*RRSIG }"    "EXPIRED 11h ago ($exp11h) — resolvers are already failing"
+
 
 # Two separators for one kind of value is a trap at the moment a list gets
 # copied between the two files. The zone table has no choice — a space there

@@ -238,29 +238,34 @@ fi
 cat <<'NEXT'
 verify before arming, in this order:
 
-  1. the checks, without touching healthchecks.io
+  1. what the run will ACTUALLY use, with every "-" in the zone table already
+     replaced by the default it stands for. Cheapest step, and the only one
+     that catches a row you did not mean:
+     sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+
+  2. the checks, without touching healthchecks.io
      sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping
 
-  2. the sandbox — proves the unit file does not block what step 1 proved works
+  3. the sandbox — proves the unit file does not block what step 2 proved works
      sudo systemctl start dnscheck.service
      sudo journalctl -u dnscheck -n 30 --no-pager
      (sudo matters: without it journalctl prints "-- No entries --" rather than
       an error, unless your account is in the adm or systemd-journal group)
 
-  3. the ALERT path, not just the ping path. Point it at a throwaway zone
+  4. the ALERT path, not just the ping path. Point it at a throwaway zone
      table naming a zone that is broken on purpose, and confirm the
      notification actually reaches you:
      printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
      sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
      rm /tmp/alert.zones
 
-  4. arm it
+  5. arm it
      sudo systemctl enable --now dnscheck.timer
 
 healthchecks.io: period 1 hour, grace 15 min, on a uuid of its OWN — never one
 shared with another check.
 Reminders: Account Settings > Email Reports > daily.
 
-Step 3 is the one people skip. A dead-man switch you have never seen trip is a
+Step 4 is the one people skip. A dead-man switch you have never seen trip is a
 hypothesis, not a monitor.
 NEXT
