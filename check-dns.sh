@@ -475,6 +475,15 @@ auth_query() {
         @"$2" "$1" "$3" 2>/dev/null
 }
 
+# The same query forced over TCP, with room for the handshake to finish.
+# Used only as a second attempt: a timeout is the one failure a retry can
+# legitimately disagree with, and repeating it over UDP would mostly
+# reproduce it.
+auth_query_tcp() {
+    dig +dnssec +norecurse +noall +comments +answer +tcp +time=5 +tries=1 \
+        @"$2" "$1" "$3" 2>/dev/null
+}
+
 hdr_status() { sed -n 's/.*status: \([A-Z]*\).*/\1/p' <<<"$1" | head -1; }
 hdr_flags()  { sed -n 's/^;; flags: \([^;]*\);.*/\1/p'  <<<"$1" | head -1; }
 
@@ -632,13 +641,29 @@ check_ns() {
     # The DNSKEY RRset is signed by the KSK on its own schedule, so its
     # signatures can expire while the SOA's are still fresh. Checking only the
     # SOA would miss a stalled KSK resign right up until the zone went dark.
+    #
+    # Asked twice, the second time over TCP, before a failure is believed.
+    # This is the largest response the run asks for — every key, plus every
+    # signature over them, which through a rollover means two of each — so it
+    # routinely exceeds the 1232-byte EDNS buffer and arrives only after a
+    # truncated UDP reply and a second round trip. That makes it the one query
+    # here whose success depends on a handshake completing inside the timeout,
+    # and so the one most likely to fail for reasons that have nothing to do
+    # with the KSK. A single dropped packet is not evidence about signing, and
+    # reporting it as though it were pages someone at 3am to look at a zone
+    # that never stopped serving. A KSK that has actually stalled fails both
+    # attempts and still reports, one hour later at the latest.
     out=$(auth_query "$zone" "$ip" DNSKEY)
+    if [[ -z $out || $(hdr_status "$out") != NOERROR ]]; then
+        sleep 2
+        out=$(auth_query_tcp "$zone" "$ip" DNSKEY)
+    fi
     if [[ -n $out && $(hdr_status "$out") == NOERROR ]]; then
         RRSIG_SECS=''
         check_rrsig "$out" "$zone" "$name" DNSKEY
         [[ -n $RRSIG_SECS && -n $soa_secs ]] && (( RRSIG_SECS < soa_secs )) && soa_secs=$RRSIG_SECS
     else
-        note "$zone @$name: DNSKEY query failed — cannot check the KSK signature"
+        note "$zone @$name: DNSKEY query failed twice, the second time over TCP — cannot check the KSK signature"
     fi
 
     NS_RRSIG_SECS=$soa_secs
