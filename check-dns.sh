@@ -642,17 +642,21 @@ check_ns() {
     # signatures can expire while the SOA's are still fresh. Checking only the
     # SOA would miss a stalled KSK resign right up until the zone went dark.
     #
-    # Asked twice, the second time over TCP, before a failure is believed.
-    # This is the largest response the run asks for — every key, plus every
-    # signature over them, which through a rollover means two of each — so it
-    # routinely exceeds the 1232-byte EDNS buffer and arrives only after a
-    # truncated UDP reply and a second round trip. That makes it the one query
-    # here whose success depends on a handshake completing inside the timeout,
-    # and so the one most likely to fail for reasons that have nothing to do
-    # with the KSK. A single dropped packet is not evidence about signing, and
-    # reporting it as though it were pages someone at 3am to look at a zone
-    # that never stopped serving. A KSK that has actually stalled fails both
-    # attempts and still reports, one hour later at the latest.
+    # Asked twice before a failure is believed. A query can fail for reasons
+    # that say nothing about signing — one lost packet is enough — and this
+    # is the second query to the same box in the same run, so it is the one
+    # most exposed to a momentary drop or a burst of load. Reporting that as
+    # a KSK problem pages someone at 3am to look at a zone that never stopped
+    # serving, which is exactly what it did.
+    #
+    # The retry goes over TCP because a second UDP query would mostly
+    # reproduce whatever lost the first, and because TCP additionally covers
+    # the truncation case — an RSA zone, or one mid-rollover carrying two
+    # keys and two signatures, can push this response past the 1232-byte EDNS
+    # buffer, where the answer only arrives after a handshake. (Not these
+    # zones: algorithm 13 keeps the whole RRset to a few hundred bytes.)
+    #
+    # A KSK that has really stalled fails both attempts and still reports.
     out=$(auth_query "$zone" "$ip" DNSKEY)
     if [[ -z $out || $(hdr_status "$out") != NOERROR ]]; then
         sleep 2
