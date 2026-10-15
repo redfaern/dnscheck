@@ -478,7 +478,8 @@ auth_query() {
 # The same query forced over TCP, with room for the handshake to finish.
 # Used only as a second attempt: a timeout is the one failure a retry can
 # legitimately disagree with, and repeating it over UDP would mostly
-# reproduce it.
+# reproduce it. Also asked, by noreply_note, where a server that ignored
+# UDP twice is — never as proof that it is up.
 auth_query_tcp() {
     dig +dnssec +norecurse +noall +comments +answer +tcp +time=5 +tries=1 \
         @"$2" "$1" "$3" 2>/dev/null
@@ -486,6 +487,14 @@ auth_query_tcp() {
 
 hdr_status() { sed -n 's/.*status: \([A-Z]*\).*/\1/p' <<<"$1" | head -1; }
 hdr_flags()  { sed -n 's/^;; flags: \([^;]*\);.*/\1/p'  <<<"$1" | head -1; }
+
+# No reply is no STATUS line, not empty output. dig prints even when nothing
+# came back — ";; communications error to …: timed out", ";; no servers could
+# be reached" — so testing for empty output let a timeout fall through to the
+# rcode check, which reported it as "SOA query returned " with nothing after.
+no_reply()   { [[ -z $(hdr_status "$1") ]]; }
+# dig's own last word on a query that got no reply, for the note.
+dig_reason() { sed -n 's/^;; *//p' <<<"$1" | tail -1; }
 
 # Seconds -> the largest unit that says something, because a fixed unit lies at
 # one end or the other. Days truncate to "0d" for anything inside 24 hours, so
@@ -558,6 +567,27 @@ check_rrsig() {
     return 0
 }
 
+# A nameserver that did not answer over UDP, twice. Asks once more over TCP,
+# and only to say WHERE to look: the TCP answer never counts as the server
+# being up. Resolvers do not fall back to TCP when UDP times out — they move on
+# to another nameserver — so a server reachable only over TCP is down for
+# everyone who matters. What TCP does tell you is whether the box is there at
+# all, which is the difference between "go and look at the server" and "go and
+# look at what is dropping UDP on the way to it".
+noreply_note() {
+    local zone=$1 name=$2 ip=$3 reason tcp tstatus
+    reason=$(dig_reason "$4")
+    reason=${reason:-no reply}
+    tcp=$(auth_query_tcp "$zone" "$ip" SOA)
+    if no_reply "$tcp"; then
+        tstatus=$(dig_reason "$tcp")
+        note "$zone @$name ($ip): no response over UDP, twice 20s apart ($reason), nor over TCP (${tstatus:-no reply}) — down, unreachable, or too slow"
+    else
+        tstatus=$(hdr_status "$tcp")
+        note "$zone @$name ($ip): no response over UDP, twice 20s apart ($reason), but TCP answered ($tstatus) — the server is up and UDP 53 to it is being dropped: a firewall, or the server shedding load. Resolvers do not retry over TCP, so to them it is down."
+    fi
+}
+
 # One nameserver, one zone. Sets NS_SERIAL and NS_RRSIG_SECS; appends its own
 # notes rather than returning them, so it must never run in a subshell — an
 # array appended to inside $(...) is discarded when the subshell exits.
@@ -568,10 +598,20 @@ check_ns() {
     NS_UNSIGNED=0
     NS_AA=0
 
+    # Two strikes, as for a serial mismatch. A lost packet or a busy few
+    # seconds on the server is not an outage, and one unanswered query cannot
+    # tell them apart: an alert that clears itself on the next hourly run,
+    # having said nothing you could act on, is an alert you learn to ignore.
+    # A server still silent 20s later is reported.
     out=$(auth_query "$zone" "$ip" SOA)
-    if [[ -z $out ]]; then
-        note "$zone @$name ($ip): no response — down, filtered, or too slow"
-        return 1
+    if no_reply "$out"; then
+        sleep 20
+        out=$(auth_query "$zone" "$ip" SOA)
+        if no_reply "$out"; then
+            noreply_note "$zone" "$name" "$ip" "$out"
+            return 1
+        fi
+        info "$zone @$name: no answer at first, answered 20s later"
     fi
 
     status=$(hdr_status "$out")

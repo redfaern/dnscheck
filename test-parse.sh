@@ -54,6 +54,31 @@ ad=" $(hdr_flags "$NXD_OUT") "
 [[ $ad == *" ad "* ]] && is 'AD detected' yes yes || is 'AD detected' no yes
 [[ $aa == *" ad "* ]] && is 'AA output has no AD' yes no || is 'AA output has no AD' no no
 
+# A query that got no reply. dig still writes to stdout, so the output is not
+# empty — the test that once caught this, [[ -z $out ]], let it through to the
+# rcode check, which printed "SOA query returned " with nothing after it.
+# Both shapes: 9.18+ prints one line per try, 9.16 one line in all.
+read -r -d '' TIMEOUT_918 <<'FIXTURE'
+;; communications error to 192.0.2.1#53: timed out
+;; communications error to 192.0.2.1#53: timed out
+;; no servers could be reached
+FIXTURE
+read -r -d '' TIMEOUT_916 <<'FIXTURE'
+;; connection timed out; no servers could be reached
+FIXTURE
+
+no_reply()   { [[ -z $(hdr_status "$1") ]]; }
+dig_reason() { sed -n 's/^;; *//p' <<<"$1" | tail -1; }
+
+no_reply "$TIMEOUT_918" && is 'timeout (9.18) is no reply' yes yes || is 'timeout (9.18) is no reply' no yes
+no_reply "$TIMEOUT_916" && is 'timeout (9.16) is no reply' yes yes || is 'timeout (9.16) is no reply' no yes
+no_reply ''             && is 'empty output is no reply'   yes yes || is 'empty output is no reply'   no yes
+no_reply "$LAME_OUT"    && is 'REFUSED is a reply'          no no  || is 'REFUSED is a reply'          yes yes
+no_reply "$SOA_OUT"     && is 'NOERROR is a reply'          no no  || is 'NOERROR is a reply'          yes yes
+is 'reason, 9.18'  "$(dig_reason "$TIMEOUT_918")" 'no servers could be reached'
+is 'reason, 9.16'  "$(dig_reason "$TIMEOUT_916")" 'connection timed out; no servers could be reached'
+is 'reason, empty' "$(dig_reason '')" ''
+
 # Column positions. SOA: name ttl class SOA mname rname SERIAL ...
 is 'SOA serial is $7' "$(awk '$4=="SOA"{print $7; exit}' <<<"$SOA_OUT")" '2026081701'
 

@@ -15,7 +15,11 @@ checks; those declared `signed` additionally get the DNSSEC ones.
 
 Per zone, against each nameserver you list:
 
-- **Reachability** — the server answers at all, within 6s.
+- **Reachability** — the server answers at all, within 6s. A server that
+  does not is asked again 20s later, so a dropped packet is not an alert; one
+  still silent is then asked over TCP, purely to say whether the box is down
+  or UDP to it is being dropped. A TCP answer never counts as up — resolvers
+  do not fall back to TCP on a timeout.
 - **Authority** — the answer carries the `AA` flag. A box that has dropped your
   zone still replies; "replied" is not "still authoritative".
 - **Agreement** — SOA serials match across every nameserver, per zone. Zones are

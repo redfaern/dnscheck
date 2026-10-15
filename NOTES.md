@@ -271,6 +271,21 @@ after a NOTIFY is normal, healthy behaviour. Alarming on first sight pages you
 for a working system. The script re-queries after 20s and only reports a
 mismatch that survives: two strikes, not one.
 
+**An unanswered nameserver needs two strikes too.** One lost UDP packet, or a
+server busy for a few seconds, used to fail the run and clear itself an hour
+later, with nothing in between to act on. The SOA query is now repeated after
+20s and only a second silence is reported. That one is then asked over TCP,
+but only to sharpen the message: "TCP answered" means the server is up and
+something is dropping UDP 53; "neither" means look at the server. A TCP
+answer is never treated as healthy, because resolvers do not retry over TCP
+on a timeout — they try another nameserver — so a server reachable only over
+TCP is down for everyone who uses it.
+
+**No reply is no status line, not empty output.** dig prints on a timeout
+(`;; communications error to …: timed out`, `;; no servers could be
+reached`), so testing `[[ -z $out ]]` let a timeout through to the rcode
+check, which reported it as `SOA query returned ` with no reason at all.
+
 **Its own healthchecks UUID.** Sharing one with another check would let that
 check's healthy pings keep this one looking alive, which is precisely the
 failure a dead-man switch exists to catch. The same argument is why only one
