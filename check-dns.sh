@@ -577,16 +577,25 @@ dig_reason() { sed -n 's/^;; *//p' <<<"$1" | tail -1; }
 # and both read as though nothing is happening. Hours would say "720h" for a
 # zone that stopped resigning a month ago.
 #
+# Days only from a week up; hours below that, down to 3h; minutes below 3h.
+# Switching at one of a unit truncated by up to half — 47h read as "1d", and a
+# zone signed on the fly (Cloudflare holds about 25 hours, all the time) read
+# "1d" on every run, which said nothing about how close it was. Under a week
+# is where every threshold worth setting lives, so that whole range is in
+# hours, and 168h is a number anyone running DNS reads without converting.
+# Above it, truncating to days costs at most a seventh. The 3h floor for
+# hours is the same idea at the small end: "1h" could mean 1h59m.
+#
 # Truncating, not rounding, in both directions. For time REMAINING that is the
 # cautious way round — 11h59m reads as 11h. For time ELAPSED since an expiry it
 # is the other way, and 11h59m ago also reads as 11h; that is accepted rather
 # than special-cased, because once a signature has expired the magnitude
 # changes nothing. Resolvers are already failing at one hour and at one week,
 # and the message says so.
-human_span() {  # 793000 -> 9d ; 40000 -> 11h ; 2600 -> 43m ; 30 -> <1m
+human_span() {  # 793000 -> 9d ; 432000 -> 120h ; 90000 -> 25h ; 7200 -> 120m ; 30 -> <1m
     local s=${1-0}
-    if   (( s >= 86400 )); then printf '%dd' $(( s / 86400 ))
-    elif (( s >= 3600 ));  then printf '%dh' $(( s / 3600 ))
+    if   (( s >= 7 * 86400 )); then printf '%dd' $(( s / 86400 ))
+    elif (( s >= 3 * 3600 ));  then printf '%dh' $(( s / 3600 ))
     elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
     else printf '<1m'
     fi

@@ -192,15 +192,22 @@ problems=(); WARN_ACTIVE=$(dur_secs 3d);  check_rrsig "$rrset" a.com ns1 SOA >/d
 is 'threshold 3d: five days left is quiet' "${#problems[@]}" '0'
 problems=(); WARN_ACTIVE=$(dur_secs 9d);  check_rrsig "$rrset" a.com ns1 SOA >/dev/null
 is 'threshold 9d: the same signature alarms' "${#problems[@]}" '1'
-is 'and says how long is left' "${problems[0]#*RRSIG }" "expires in 5d ($sig5)"
+is 'and says how long is left' "${problems[0]#*RRSIG }" "expires in 120h ($sig5)"
 
 # human_span picks the largest unit that says something. Days alone truncate to
 # "0d" for everything inside a day, so a signature with eleven hours left and
-# one with eleven minutes read identically — and both read as fine.
+# one with eleven minutes read identically — and both read as fine. Days only
+# from a week up, so everything under a week, where the thresholds live, reads
+# in hours: switching at one day read 47h as "1d".
 is 'a span of days'   "$(human_span $(( 9 * 86400 + 3600 )))" '9d'
-is 'exactly one day'  "$(human_span 86400)"                   '1d'
-is 'just under a day' "$(human_span $(( 86400 - 1 )))"        '23h'
+is 'exactly a week'   "$(human_span $(( 7 * 86400 )))"        '7d'
+is 'just under a week' "$(human_span $(( 7 * 86400 - 1 )))"   '167h'
+is 'three days'       "$(human_span $(( 3 * 86400 )))"        '72h'
+is 'a day and a bit reads in hours' "$(human_span $(( 25 * 3600 )))" '25h'
+is 'exactly one day'  "$(human_span 86400)"                   '24h'
 is 'a span of hours'  "$(human_span $(( 11 * 3600 )))"        '11h'
+is 'exactly three hours' "$(human_span $(( 3 * 3600 )))"      '3h'
+is 'just under three hours' "$(human_span $(( 3 * 3600 - 1 )))" '179m'
 is 'just under an hour' "$(human_span 3599)"                  '59m'
 is 'a span of minutes'  "$(human_span $(( 43 * 60 )))"        '43m'
 is 'less than a minute' "$(human_span 30)"                    '<1m'
@@ -214,7 +221,7 @@ rr25="a.com. 300 IN RRSIG SOA 13 2 300 $sig25h 20260101000000 1 a.com. AA=="
 problems=(); WARN_ACTIVE=$(dur_secs 12h); check_rrsig "$rr25" a.com ns1 SOA >/dev/null
 is 'threshold 12h: 25 hours left is quiet' "${#problems[@]}" '0'
 problems=(); WARN_ACTIVE=$(dur_secs 26h); check_rrsig "$rr25" a.com ns1 SOA >/dev/null
-is 'threshold 26h: 25 hours left alarms' "${problems[0]#*RRSIG }" "expires in 1d ($sig25h)"
+is 'threshold 26h: 25 hours left alarms' "${problems[0]#*RRSIG }" "expires in 25h ($sig25h)"
 
 problems=(); WARN_ACTIVE=$(dur_secs 3d)
 sig11h=$(date -u -d "@$(( now + 11 * 3600 ))" +%Y%m%d%H%M%S)
