@@ -69,7 +69,7 @@ columns:
 example.com           signed    -     -                              -
 example.net           signed    -     -                              -
 example.org           unsigned  -     -                              -
-legacy.example.com    signed    8     old1=192.0.2.7,old2=192.0.2.8  -
+legacy.example.com    signed    8d    old1=192.0.2.7,old2=192.0.2.8  -
 internal.example      signed    -     lan1=10.0.0.53,lan2=10.0.0.54  10.0.0.53
 dmz.example.com       signed    -     dmz1=10.0.1.53                 none
 ```
@@ -78,7 +78,7 @@ dmz.example.com       signed    -     dmz1=10.0.1.53                 none
 |---|---|
 | `zone` | the zone apex |
 | `state` | `signed` or `unsigned` — **declared, not detected** |
-| `warn` | alarm when a signature has fewer than this many days left |
+| `warn` | alarm when a signature has less than this long left: a whole number and a unit, `s` `m` `h` `d` or `w` (`3d`, `36h`). A bare number is refused |
 | `nameservers` | `label=ip` pairs; the label names the server in every alert |
 | `validators` | recursive resolvers that confirm the chain from outside |
 
@@ -98,7 +98,10 @@ servers that zone was actually checked against.
 **A threshold tracks the signing policy, not the host.** The default of 3 days
 is measured against the floor of BIND's resigning cycle. A zone signed
 somewhere else, under a different policy, needs its own number rather than one
-that alarms every cycle on a healthy zone.
+that alarms every cycle on a healthy zone. A provider that signs on the fly,
+such as Cloudflare, keeps only about a day of validity at any time, so give its
+zone a threshold in hours (`12h`). In whole days, `2d` alarms on every run
+and `1d` sits an hour from doing the same.
 
 **`validators none` is for a zone no outside resolver can see.** Ask a resolver
 about a name under a TLD that does not exist and it gets a signed proof from

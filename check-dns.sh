@@ -35,11 +35,13 @@ check-dns.sh — authoritative DNS + DNSSEC health check
 Configuration (environment; normally /etc/dnscheck/dnscheck.env):
   NS          default "label=ip" pairs, space separated
   VALIDATORS  default recursive resolvers used to confirm the chain of trust
-  WARN_DAYS   default alarm when an RRSIG expires within this many days
+  WARN_PERIOD default alarm when an RRSIG expires within this long: a whole
+              number and a unit, s m h d or w (3d, 36h). WARN_DAYS, the
+              older form in whole days, is deprecated but still read.
   HC_URL      healthchecks.io ping URL (a credential; never in this file)
 
 Zones (normally /etc/dnscheck/zones), one row per zone, five columns:
-  <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->
+  <zone> <signed|unsigned> <warn|-> <label=ip,...|-> <ip,...|none|->
 
   "-" in any column takes the default from dnscheck.env. "none" in the
   validators column skips the chain-of-trust check for a zone that cannot be
@@ -104,7 +106,7 @@ conf_get() {  # conf_get <file> <key>  -> prints the value, or nothing
 }
 
 declare -A _src=()
-for _v in NS VALIDATORS WARN_DAYS HC_URL; do
+for _v in NS VALIDATORS WARN_PERIOD WARN_DAYS HC_URL; do
     # An explicit SIGNED_ZONES=... on the command line wins over the file: the
     # documented way to test the alert path is to point the check at a
     # deliberately broken zone, and that must not be silently overridden by the
@@ -131,14 +133,55 @@ unset _v _val
 # HC_URL deliberately have NO defaults: a built-in fallback for those is how a
 # misconfigured run looks like a passing one.
 : "${VALIDATORS:=1.1.1.1 8.8.8.8}"
-# 3, not 7. This is measured against the floor of the RESIGNING cycle, not the
+# 3d, not 7d. This is measured against the floor of the RESIGNING cycle, not the
 # signature's validity: BIND's default policy signs for 14 days and refreshes 5
 # days before expiry, so remaining life sawtooths between 14 and 5 and is meant
 # to. Any threshold inside that band alarms on a healthy zone — 7 would fire for
 # two days out of every nine, forever.
-: "${WARN_DAYS:=3}"
-[[ -n ${_src[VALIDATORS]:-} ]] || _src[VALIDATORS]=default
-[[ -n ${_src[WARN_DAYS]:-}  ]] || _src[WARN_DAYS]=default
+#
+# WARN_DAYS is the older, deprecated spelling and is still honoured, in whole
+# days only: WARN_DAYS=8 is WARN_PERIOD=8d. Both at once is refused rather
+# than one quietly winning — whichever lost would be a line in the file that
+# reads as the threshold and is not. A WARN_DAYS that is not a whole number of
+# days skips the default too, so the guard below refuses it instead of the run
+# going on at 3d while the file says something else.
+WARN_CONFLICT=0 WARN_DAYS_BAD=0
+if [[ -n ${WARN_DAYS+set} ]]; then
+    if [[ -n ${WARN_PERIOD+set} ]]; then
+        WARN_CONFLICT=1
+    elif [[ $WARN_DAYS =~ ^[0-9]{1,6}$ ]]; then
+        WARN_PERIOD="$((10#$WARN_DAYS))d"
+        _src[WARN_PERIOD]=WARN_DAYS
+    else
+        WARN_DAYS_BAD=1 WARN_PERIOD=''
+        _src[WARN_PERIOD]=WARN_DAYS
+    fi
+fi
+(( WARN_DAYS_BAD )) || : "${WARN_PERIOD:=3d}"
+[[ -n ${_src[VALIDATORS]:-}  ]] || _src[VALIDATORS]=default
+[[ -n ${_src[WARN_PERIOD]:-} ]] || _src[WARN_PERIOD]=default
+
+# A duration -> seconds. A whole number and ONE unit: s m h d w. The unit is
+# required, as it is on AIvy: a bare "3" meant days here until the units came
+# in, and a reader who meets "WARN_PERIOD=12" cannot tell twelve hours from twelve
+# days without the docs — and guessing wrong in the short direction switches
+# expiry warnings off. No decimals ("36h", not "1.5d"): bash has no floats,
+# and every useful threshold has a whole-number spelling in a smaller unit. At
+# most six digits, because a longer one overflows the arithmetic silently.
+# Upper case is accepted and means the same.
+dur_secs() {  # 3d -> 259200 ; 36h -> 129600 ; 3 -> (fails)
+    local t=${1-} n
+    t=${t,,}
+    [[ $t =~ ^([0-9]{1,6})([smhdw])$ ]] || return 1
+    n=$((10#${BASH_REMATCH[1]}))
+    case ${BASH_REMATCH[2]} in
+        s) echo "$n" ;;
+        m) echo $(( n * 60 )) ;;
+        h) echo $(( n * 3600 )) ;;
+        d) echo $(( n * 86400 )) ;;
+        w) echo $(( n * 604800 )) ;;
+    esac
+}
 
 # One separator, both files. A list in the zone table MUST use commas — spaces
 # there separate the five columns, so there is no choice about it — while a
@@ -189,7 +232,10 @@ show_config() {
         printf '%-15s %s\n' '' 'does not exist'
     fi
     printf '\n%-15s %-12s %s\n' 'SETTING' 'FROM' 'VALUE'
-    for v in NS VALIDATORS WARN_DAYS HC_URL; do
+    for v in NS VALIDATORS WARN_PERIOD WARN_DAYS HC_URL; do
+        # Listed only when present: a row for a setting nobody uses would
+        # read as an invitation to use it.
+        [[ $v == WARN_DAYS && -z ${WARN_DAYS+set} ]] && continue
         val=${!v:-}
         src=${_src[$v]:-unset}
         if [[ $v == HC_URL ]]; then
@@ -203,6 +249,14 @@ show_config() {
             NS|VALIDATORS)
                 [[ -n $val ]] && n="  ($(wc -w <<<"$val"))"
                 val=$(fmt_list "$val") ;;
+            WARN_DAYS)
+                if (( WARN_CONFLICT )); then
+                    n='  (deprecated, and WARN_PERIOD is set too — the run will refuse)'
+                elif (( WARN_DAYS_BAD )); then
+                    n='  (deprecated, and not a whole number of days — the run will refuse)'
+                else
+                    n="  (deprecated — read as WARN_PERIOD=$WARN_PERIOD)"
+                fi ;;
         esac
         printf '%-15s %-12s %s%s\n' "$v" "$src" "${val:-—}" "$n"
     done
@@ -224,7 +278,7 @@ show_config() {
         for (( i=0; i<Z_COUNT; i++ )); do
             (( Z_SIGNED[i] )) && st=signed || st=unsigned
             nsf=$(fmt_list "${Z_NS[i]}")
-            warnf=${Z_WARN[i]:--}
+            warnf=${Z_WARN_TXT[i]:--}
             (( ${#Z_NAME[i]} > wz )) && wz=${#Z_NAME[i]}
             (( ${#st}        > ws )) && ws=${#st}
             (( ${#warnf}     > ww )) && ww=${#warnf}
@@ -237,7 +291,7 @@ show_config() {
         for (( i=0; i<Z_COUNT; i++ )); do
             (( Z_SIGNED[i] )) && st=signed || st=unsigned
             printf '%-*s  %-*s  %-*s  %-*s  %s\n' \
-                "$wz" "${Z_NAME[i]}" "$ws" "$st" "$ww" "${Z_WARN[i]:--}" \
+                "$wz" "${Z_NAME[i]}" "$ws" "$st" "$ww" "${Z_WARN_TXT[i]:--}" \
                 "$wn" "$(fmt_list "${Z_NS[i]}")" "$(fmt_list "${Z_VAL[i]}")"
         done
     fi
@@ -265,7 +319,7 @@ show_config() {
 # needs that treatment.
 ZONES_FILE=${DNSCHECK_ZONES:-/etc/dnscheck/zones}
 
-Z_NAME=() Z_SIGNED=() Z_WARN=() Z_NS=() Z_VAL=()
+Z_NAME=() Z_SIGNED=() Z_WARN=() Z_WARN_TXT=() Z_NS=() Z_VAL=()
 Z_COUNT=0
 ZONE_ERR=()
 
@@ -273,10 +327,10 @@ ZONE_ERR=()
 # its line number. Three typos should cost one edit, not three runs.
 #
 # Nothing is appended until the whole row has validated, so a rejected row
-# leaves the arrays exactly as it found them and the five stay in step.
+# leaves the arrays exactly as it found them and they all stay in step.
 parse_zones() {
     local line lineno=0 zone state warn ns vals extra tok i bad
-    local r_warn r_ns r_val
+    local r_warn r_warn_txt r_ns r_val
     if [[ ! -e $ZONES_FILE ]]; then
         ZONE_ERR+=("$ZONES_FILE does not exist — copy zones.example there and edit it")
         return
@@ -298,7 +352,7 @@ parse_zones() {
             continue
         fi
         if [[ -z $vals ]]; then
-            ZONE_ERR+=("line $lineno: expected five columns (zone state warn-days nameservers validators), got: $line")
+            ZONE_ERR+=("line $lineno: expected five columns (zone state warn nameservers validators), got: $line")
             continue
         fi
         if [[ ! $zone =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
@@ -315,24 +369,31 @@ parse_zones() {
             continue
         fi
 
-        # --- warn-days
+        # --- warn: seconds for the comparison, and the text as written for
+        # --show-config, so the table reads back the way the row was typed.
         if [[ $state == unsigned ]]; then
             # Empty, not the default. An unsigned zone has no signatures, so
             # showing it a threshold in --show-config would imply one applies.
-            r_warn=''
+            r_warn='' r_warn_txt=''
             if [[ $warn != - ]]; then
-                ZONE_ERR+=("line $lineno: $zone is unsigned, so it has no signatures to expire — warn-days must be '-'")
+                ZONE_ERR+=("line $lineno: $zone is unsigned, so it has no signatures to expire — warn must be '-'")
                 continue
             fi
         elif [[ $warn == - ]]; then
-            r_warn=${WARN_DAYS:-}
-            # Normalise here as well: the global guard runs after this, and
-            # a leading zero in an arithmetic context is octal.
-            [[ $r_warn =~ ^[0-9]+$ ]] && r_warn=$((10#$r_warn))
+            # A bad default is left empty here and refused by the global guard
+            # below, once, rather than once per row that uses it.
+            r_warn=$(dur_secs "${WARN_PERIOD:-}") || r_warn=''
+            r_warn_txt=${WARN_PERIOD:-}
+        elif r_warn=$(dur_secs "$warn"); then
+            r_warn_txt=${warn,,}
         elif [[ $warn =~ ^[0-9]+$ ]]; then
-            r_warn=$((10#$warn))
+            # Refused, not read as days, even though days is what it used to
+            # mean. Unlike WARN_DAYS, the column's name says nothing about the
+            # unit, so "12" here is exactly the ambiguity units exist to end.
+            ZONE_ERR+=("line $lineno: warn '$warn' has no unit — write ${warn}d for days, or use s, m, h or w")
+            continue
         else
-            ZONE_ERR+=("line $lineno: warn-days must be a whole number of days or '-', not '$warn'")
+            ZONE_ERR+=("line $lineno: warn must be a whole number and a unit (s, m, h, d or w — 3d, 36h) or '-', not '$warn'")
             continue
         fi
 
@@ -370,6 +431,7 @@ parse_zones() {
         Z_NAME+=("$zone")
         [[ $state == signed ]] && Z_SIGNED+=(1) || Z_SIGNED+=(0)
         Z_WARN+=("$r_warn")
+        Z_WARN_TXT+=("$r_warn_txt")
         Z_NS+=("$r_ns")
         Z_VAL+=("$r_val")
         Z_COUNT=$((Z_COUNT + 1))
@@ -408,7 +470,7 @@ for _old in ZONES SIGNED_ZONES UNSIGNED_ZONES; do
     grep -qE "^[[:space:]]*$_old[[:space:]]*=" "$CONF_FILE" 2>/dev/null || continue
     printf '%s in %s: the zone lists now live in %s, one row per zone.\n\n' \
         "$_old" "$CONF_FILE" "$ZONES_FILE" >&2
-    printf '  <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->\n\n' >&2
+    printf '  <zone> <signed|unsigned> <warn|-> <label=ip,...|-> <ip,...|none|->\n\n' >&2
     printf 'A zone keeps its own nameservers there, so an internal zone on internal\n' >&2
     printf 'servers can sit beside a public one, and "none" in the last column skips\n' >&2
     printf 'the chain-of-trust check for a zone no outside resolver can see. Delete\n' >&2
@@ -417,12 +479,20 @@ for _old in ZONES SIGNED_ZONES UNSIGNED_ZONES; do
 done
 unset _old
 
+if (( WARN_CONFLICT )); then
+    printf 'both WARN_PERIOD=%s and WARN_DAYS=%s are set.\n\n' "$WARN_PERIOD" "$WARN_DAYS" >&2
+    printf 'WARN_DAYS is the deprecated form of WARN_PERIOD; keep one. Neither is\n' >&2
+    printf 'picked for you, because the one left over would read as the threshold\n' >&2
+    printf 'and not be. Check %s, and the environment.\n' "$CONF_FILE" >&2
+    exit 3
+fi
+
 # Reported together, with line numbers, and only now — --show-config above
 # prints them too, and a broken config is exactly when you want to look.
 if (( ${#ZONE_ERR[@]} )); then
     printf 'cannot read the zone table:\n\n' >&2
     printf '  %s\n' "${ZONE_ERR[@]}" >&2
-    printf '\nEach row is: <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->\n' >&2
+    printf '\nEach row is: <zone> <signed|unsigned> <warn|-> <label=ip,...|-> <ip,...|none|->\n' >&2
     printf 'See zones.example, or run --show-config to see what was read.\n' >&2
     exit 3
 fi
@@ -430,23 +500,28 @@ fi
 # exercised before there is a healthchecks.io check to point at.
 ((no_ping)) || [[ -n ${HC_URL:-} ]] || cfg_missing HC_URL
 
-# WARN_DAYS is the only setting that reaches an arithmetic context, and bash
-# fails two different ways there, both quiet.
-#
-#   WARN_DAYS=three    `three` is read as a VARIABLE, is unset, and set -u
-#                      kills the run mid-check — before any report or ping.
-#   WARN_DAYS=3 days   every realistic typo: a stray trailing comment, a unit,
-#                      a decimal point. (( )) prints an arithmetic error and
-#                      returns non-zero, and with no set -e the run carries on
-#                      treating the comparison as FALSE. Signature expiry is
-#                      no longer watched, and the run pings SUCCESS.
-#
-# The second is the dangerous one, and it is the same failure as the bare ZONES
-# key refused above: parses fine, runs fine, checks nothing. So validate rather
-# than trust — and normalise to base 10, because a leading zero in an
-# arithmetic context is OCTAL and 010 would silently mean 8.
-[[ ${WARN_DAYS:-} =~ ^[0-9]+$ ]] || cfg_missing 'a numeric WARN_DAYS (whole days, digits only)'
-WARN_DAYS=$((10#$WARN_DAYS))
+# WARN_PERIOD is the only setting that reaches an arithmetic context, and a value
+# that got there unvalidated would fail quietly: a stray trailing comment or a
+# space makes (( )) an arithmetic error, which with no set -e reads as FALSE —
+# signature expiry no longer watched, and the run pings SUCCESS. The same
+# failure as the bare ZONES key refused above: parses fine, runs fine, checks
+# nothing. So it goes through dur_secs, which takes only <digits><unit> and
+# returns base-10 seconds (a leading zero would otherwise be OCTAL), and
+# anything else refuses to start. A bare number gets its own message because
+# it is the likeliest mistake: it was the only valid form before units.
+(( WARN_DAYS_BAD )) \
+    && cfg_missing "a whole number of days in WARN_DAYS, not '$WARN_DAYS' — or replace it with WARN_PERIOD, which takes a unit (8d, 192h)"
+if ! dur_secs "${WARN_PERIOD:-}" >/dev/null; then
+    [[ ${WARN_PERIOD:-} =~ ^[0-9]+$ ]] \
+        && cfg_missing "a unit on WARN_PERIOD=$WARN_PERIOD — write WARN_PERIOD=${WARN_PERIOD}d for days, or use s, m, h or w"
+    cfg_missing "a valid WARN_PERIOD — a whole number and a unit, s m h d or w (3d, 36h), not '${WARN_PERIOD:-}'"
+fi
+# Accepted, and said on every run until edited — on stderr, so the journal
+# carries it, but never as a problem: a deprecated spelling is not an outage,
+# and paging for one would teach the alert to be ignored.
+[[ ${_src[WARN_PERIOD]} == WARN_DAYS ]] \
+    && printf 'note: WARN_DAYS is deprecated — replace WARN_DAYS=%s with WARN_PERIOD=%s in %s\n' \
+        "$WARN_DAYS" "$WARN_PERIOD" "$CONF_FILE" >&2
 
 problems=()
 summary=()
@@ -557,7 +632,7 @@ check_rrsig() {
         # one, and "EXPIRED 0d ago" reads like a rounding artefact rather than
         # an emergency.
         note "$zone @$name: $type RRSIG EXPIRED $(human_span $(( now - best ))) ago ($best_exp) — resolvers are already failing"
-    elif (( (best - now) / 86400 < WARN_ACTIVE )); then
+    elif (( best - now < WARN_ACTIVE )); then  # both in seconds
         note "$zone @$name: $type RRSIG expires in $(human_span $(( best - now ))) ($best_exp)"
     fi
 
@@ -728,7 +803,9 @@ for (( zi=0; zi<Z_COUNT; zi++ )); do
     zone_val=${Z_VAL[zi]}
     # check_rrsig reads this rather than the global: the threshold tracks the
     # SIGNING POLICY — BIND's 14-day/5-day resign cycle is the whole reason it
-    # is 3 — and policy belongs to the zone, not to the host running the check.
+    # is 3d — and policy belongs to the zone, not to the host running the check.
+    # Seconds, so a zone signed on the fly with about a day of validity can be
+    # given a threshold in hours.
     WARN_ACTIVE=${Z_WARN[zi]}
     # 'none' means the zone was DECLARED unresolvable from outside. An empty
     # list makes the validator loop run zero times; the notes that would fire

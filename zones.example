@@ -2,7 +2,7 @@
 #
 # One row per zone. Five columns, whitespace separated:
 #
-#   <zone>  <signed|unsigned>  <warn-days|->  <label=ip,...|->  <ip,...|none|->
+#   <zone>  <signed|unsigned>  <warn|->  <label=ip,...|->  <ip,...|none|->
 #
 # "-" in any column means "use the default from dnscheck.env". Lists inside a
 # column are separated by COMMAS, never spaces, so the columns stay columns —
@@ -40,13 +40,19 @@
 # for it, because otherwise its signature expiry would go unwatched.
 #
 # ---------------------------------------------------------------------------
-# warn-days — alarm when a signature has this many days left
+# warn — alarm when a signature has less than this long left
+#
+# A whole number and a unit: s, m, h, d or w — 3d, 36h, 2w. The unit is
+# required; a bare "5" is refused rather than guessed at, because twelve
+# hours and twelve days are both plausible and the short guess switches
+# warnings off. No decimals: write 36h, not 1.5d.
 #
 # Must be "-" for an unsigned zone, which has no signatures to expire. For a
-# signed one, "-" takes WARN_DAYS from dnscheck.env; give a zone its own number
-# when it is signed under a different policy. The threshold is measured against
+# signed one, "-" takes WARN_PERIOD from dnscheck.env; give a zone its own
+# value when it is signed under a different policy — a zone signed on the fly
+# (Cloudflare, for one) holds only about a day of validity, and wants hours. The threshold is measured against
 # the floor of the RESIGNING cycle, not the signature's validity — see the
-# WARN_DAYS notes in dnscheck.env.example, which explain why the default is 3
+# WARN_PERIOD notes in dnscheck.env.example, which explain why the default is 3d
 # and why 7 would alarm on a healthy zone a fifth of the time.
 #
 # ---------------------------------------------------------------------------
@@ -90,7 +96,7 @@
 
 # zone                state     warn  nameservers                    validators
 example.com           signed    -     -                              -
-example.net           signed    5     -                              -
+example.net           signed    5d    -                              -
 example.org           unsigned  -     -                              -
 
 # An internal zone on its own servers, validated by its own resolver:

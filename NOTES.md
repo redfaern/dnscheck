@@ -149,7 +149,7 @@ One marked `unsigned` that is signed is reported the first time a validator
 returns AD for it — that direction is the expensive one, because the
 zone works fine while its signature expiry goes unwatched.
 
-**`WARN_DAYS` is measured against the resigning floor, not the signature
+**`WARN_PERIOD` is measured against the resigning floor, not the signature
 lifetime.** BIND's default policy issues RRSIGs valid for 14 days and refreshes
 them 5 days before expiry, so remaining life sawtooths between 14 and 5. It is
 *supposed* to reach 5 and jump back. A threshold anywhere in that band fires on
@@ -162,6 +162,14 @@ signatures do not all come due together. Hitting 3 means resigning is two days
 overdue, with three days left before validating resolvers begin to fail.
 
 The general rule, for any policy: a couple of days below the REFRESH threshold.
+For a zone signed on the fly (Cloudflare holds roughly a day of validity at all
+times) the same rule comes out in hours, which is why the threshold takes a
+unit. It was `WARN_DAYS`, whole days only, and no whole-day value fits such a
+zone: with about 25 hours left at all times, `2d` alarms on every run, and `1d`
+sits an hour from doing the same. `WARN_DAYS` is
+still read, as days, with a note on every run; both at once is refused. In the
+zones file a bare number is refused outright, because that column's name gives
+no hint of the unit.
 Deriving it from the validity interval instead is the mistake — those are
 different numbers, and only one of them is the floor.
 
