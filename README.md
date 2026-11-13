@@ -164,14 +164,14 @@ sudo nano /etc/dnscheck/dnscheck.env
 sudo nano /etc/dnscheck/zones
 
 # 5. confirm the run will use what you think it will
-sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+sudo check-dns.sh --show-config
 ```
 
 Then the rest of the sequence `deploy.sh` prints when it finishes. Step 1 is
 the `--show-config` above:
 
 ```sh
-sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping        # 2. the checks
+sudo check-dns.sh --no-ping                                # 2. the checks
 sudo systemctl start dnscheck.service                      # 3. the sandbox
 sudo journalctl -u dnscheck -n 30 --no-pager
 sudo systemctl enable --now dnscheck.timer                 # 5. arm it
@@ -183,7 +183,7 @@ table rather than your real one:
 
 ```sh
 printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
-sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
+sudo DNSCHECK_ZONES=/tmp/alert.zones check-dns.sh
 rm /tmp/alert.zones
 ```
 
@@ -212,6 +212,7 @@ any host without systemd.
 |---|---|---|
 | `check-dns.sh` | `/usr/local/lib/dnscheck/` | 0755 root:root |
 | `NOTES.md` | `/usr/local/lib/dnscheck/` | 0644 root:root |
+| link to `check-dns.sh` | `/usr/local/sbin/check-dns.sh` | symlink, on `sudo`'s PATH |
 | `dnscheck.env.example` | `/etc/dnscheck/dnscheck.env` | 0600 root:root, dir 0755 |
 | `zones.example` | `/etc/dnscheck/zones` | 0644 root:root |
 | `dnscheck.service`, `dnscheck.timer` | `/etc/systemd/system/` | 0644 root:root |
@@ -245,7 +246,7 @@ a false alert.
 To see what a run would actually use, and where each value came from:
 
 ```sh
-sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+sudo check-dns.sh --show-config
 ```
 
 That is not the same question as "what is in the file", which is all `grep` can

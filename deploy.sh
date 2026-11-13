@@ -12,6 +12,7 @@
 set -euo pipefail
 
 LIB_DIR=/usr/local/lib/dnscheck
+LINK=/usr/local/sbin/check-dns.sh
 CONF_DIR=/etc/dnscheck
 UNIT_DIR=/etc/systemd/system
 CONF_FILE="$CONF_DIR/dnscheck.env"
@@ -30,6 +31,7 @@ deploy.sh — install the dnscheck files onto this host
 
 Places:
   /usr/local/lib/dnscheck/     check-dns.sh, NOTES.md      0755 root:root
+  /usr/local/sbin/check-dns.sh link to the above, on sudo's PATH
   /etc/dnscheck/               config directory            0755 root:root
   /etc/dnscheck/dnscheck.env   your config                 0600 root:root
   /etc/dnscheck/zones          your zone table             0644 root:root
@@ -133,6 +135,26 @@ say "placing the check in $LIB_DIR"
 run install -d -m 0755 -o root -g root "$LIB_DIR"
 sync_file check-dns.sh "$LIB_DIR/check-dns.sh" 0755
 sync_file NOTES.md     "$LIB_DIR/NOTES.md"     0644
+
+# On the PATH as a link, not a copy: one file, so the command you type and the
+# one the timer runs cannot drift apart. sbin, because a useful run needs root
+# to read dnscheck.env — and sudo's secure_path includes /usr/local/sbin on
+# Debian, so `sudo check-dns.sh` works without touching anyone's PATH.
+#
+# Only a link this script would have made gets replaced. Anything else at that
+# path — a real file, a link somewhere else — is someone's decision, and is
+# reported rather than overwritten.
+cur=$(readlink "$LINK" 2>/dev/null || true)
+if [[ $cur == "$LIB_DIR/check-dns.sh" ]]; then
+    printf '  unchanged: %s -> %s\n' "$LINK" "$cur"
+elif [[ -e $LINK || -L $LINK ]] && [[ ! -L $LINK || $cur != */dnscheck/check-dns.sh ]]; then
+    printf '  SKIPPED:   %s (already exists, and is not our link)\n' "$LINK"
+    note "$LINK exists and is not a link to $LIB_DIR/check-dns.sh — remove it and re-run, or keep using the full path"
+else
+    printf '  link:      %s -> %s\n' "$LINK" "$LIB_DIR/check-dns.sh"
+    run install -d -m 0755 -o root -g root "$(dirname "$LINK")"
+    run ln -sfn "$LIB_DIR/check-dns.sh" "$LINK"
+fi
 say ''
 
 # --- configuration -----------------------------------------------------------
@@ -196,7 +218,7 @@ if [[ -f $ZONES_FILE ]]; then
 else
     printf '  install:   %s (from the example — EDIT IT)\n' "$ZONES_FILE"
     run install -m 0644 -o root -g root zones.example "$ZONES_FILE"
-    note "edit $ZONES_FILE: one row per zone — <zone> <signed|unsigned> <warn-days|-> <label=ip,...|-> <ip,...|none|->"
+    note "edit $ZONES_FILE: one row per zone — <zone> <signed|unsigned> <warn|-> <label=ip,...|-> <ip,...|none|->"
 fi
 say ''
 
@@ -241,10 +263,10 @@ verify before arming, in this order:
   1. what the run will ACTUALLY use, with every "-" in the zone table already
      replaced by the default it stands for. Cheapest step, and the only one
      that catches a row you did not mean:
-     sudo /usr/local/lib/dnscheck/check-dns.sh --show-config
+     sudo check-dns.sh --show-config
 
   2. the checks, without touching healthchecks.io
-     sudo /usr/local/lib/dnscheck/check-dns.sh --no-ping
+     sudo check-dns.sh --no-ping
 
   3. the sandbox — proves the unit file does not block what step 2 proved works
      sudo systemctl start dnscheck.service
@@ -256,7 +278,7 @@ verify before arming, in this order:
      table naming a zone that is broken on purpose, and confirm the
      notification actually reaches you:
      printf 'dnssec-failed.org signed - unreachable=192.0.2.1 -\n' > /tmp/alert.zones
-     sudo DNSCHECK_ZONES=/tmp/alert.zones /usr/local/lib/dnscheck/check-dns.sh
+     sudo DNSCHECK_ZONES=/tmp/alert.zones check-dns.sh
      rm /tmp/alert.zones
 
   5. arm it
